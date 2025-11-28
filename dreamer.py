@@ -4,7 +4,7 @@ import os
 import pathlib
 import sys
 
-os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["MUJOCO_GL"] = "glfw"
 
 import numpy as np
 import ruamel.yaml as yaml
@@ -193,10 +193,21 @@ def make_env(config, mode, id):
 
         env = minecraft.make_env(task, size=config.size, break_speed=config.break_speed)
         env = wrappers.OneHotAction(env)
+    elif suite == "gymnasium":
+        from envs.gymnasium import GymEnv
+        vision = getattr(config, "vision", False) or getattr(config, "pixel_obs", False)
+        env = GymEnv(
+            task,
+            action_repeat=config.action_repeat,
+            size=config.size,
+            seed=config.seed + id,
+            vision=vision,
+        )
     else:
         raise NotImplementedError(suite)
     env = wrappers.TimeLimit(env, config.time_limit)
-    env = wrappers.SelectAction(env, key="action")
+    if suite not in ["gymnasium"]:
+        env = wrappers.SelectAction(env, key="action")
     env = wrappers.UUID(env)
     if suite == "minecraft":
         env = wrappers.RewardObs(env)

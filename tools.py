@@ -216,12 +216,14 @@ def simulate(
                         cache[envs[i].id].pop(key)
 
                 if not is_eval:
-                    step_in_dataset = erase_over_episodes(cache, limit)
+                    # step_in_dataset = erase_over_episodes(cache, limit)
+                    step_in_dataset = enforce_reservoir_limit(cache, directory, limit)
                     logger.scalar(f"dataset_size", step_in_dataset)
                     logger.scalar(f"train_return", score)
                     logger.scalar(f"train_length", length)
                     logger.scalar(f"train_episodes", len(cache))
                     logger.write(step=logger.step)
+                    
                 else:
                     if not "eval_lengths" in locals():
                         eval_lengths = []
@@ -264,18 +266,60 @@ def add_to_cache(cache, id, transition):
                 cache[id][key].append(convert(val))
 
 
-def erase_over_episodes(cache, dataset_size):
-    step_in_dataset = 0
-    for key, ep in reversed(sorted(cache.items(), key=lambda x: x[0])):
-        if (
-            not dataset_size
-            or step_in_dataset + (len(ep["reward"]) - 1) <= dataset_size
-        ):
-            step_in_dataset += len(ep["reward"]) - 1
-        else:
-            del cache[key]
-    return step_in_dataset
+# def erase_over_episodes(cache, dataset_size):
+#     step_in_dataset = 0
+#     for key, ep in reversed(sorted(cache.items(), key=lambda x: x[0])):
+#         if (
+#             not dataset_size
+#             or step_in_dataset + (len(ep["reward"]) - 1) <= dataset_size
+#         ):
+#             step_in_dataset += len(ep["reward"]) - 1
+#         else:
+#             del cache[key]
+#     return step_in_dataset
 
+def enforce_reservoir_limit(cache, directory, dataset_size):
+    """
+    Continual Learning Logic:
+    Instead of deleting the oldest episodes (FIFO), we randomly evict episodes
+    when the buffer is full. This maintains a distribution of past and present
+    dynamics (e.g., different gravities), preventing catastrophic forgetting.
+    """
+    # 1. Calculate current size in steps
+    step_in_dataset = 0
+    for ep in cache.values():
+        step_in_dataset += (len(ep["reward"]) - 1)
+
+    # 2. If we are under the limit, do nothing
+    if not dataset_size or step_in_dataset <= dataset_size:
+        return step_in_dataset
+
+    # 3. Reservoir / Random Eviction Loop
+    keys = list(cache.keys())
+    
+    # We want to evict until we are back under the limit
+    while step_in_dataset > dataset_size and len(keys) > 0:
+        # RANDOM SELECTION (The core of Reservoir Replay)
+        victim_key = random.choice(keys)
+        
+        # Remove from RAM Cache
+        victim_ep = cache.pop(victim_key)
+        keys.remove(victim_key)
+        
+        # Update size count
+        step_in_dataset -= (len(victim_ep["reward"]) - 1)
+
+        # Remove from DISK (Crucial for CL persistence)
+        # cache keys are filenames like '20231128T120000'
+        # We search for the file to delete it physically.
+        found_files = list(directory.glob(f"{victim_key}*.npz"))
+        for f in found_files:
+            try:
+                os.remove(f)
+            except OSError as e:
+                print(f"Error deleting reservoir victim {f}: {e}")
+
+    return step_in_dataset
 
 def convert(value, precision=32):
     value = np.array(value)
@@ -874,7 +918,6 @@ class Until:
         if not self._until:
             return True
         return step < self._until
-
 
 def weight_init(m):
     if isinstance(m, nn.Linear):
