@@ -144,6 +144,32 @@ def make_dataset(episodes, config):
 
 
 def make_env(config, mode, id):
+# --- FIX: Custom parsing for Continual Learning Suite ---
+    if config.task.startswith("dmc_crl"):
+        # Format: dmc_crl_cartpole_balance
+        # We need to extract: "balance"
+        parts = config.task.split("_")
+        # parts = ['dmc', 'crl', 'cartpole', 'balance']
+        
+        # The DM Control task name is the LAST part
+        dmc_task_name = parts[-1] 
+        
+        import envs.dmc as dmc
+        # Initialize our custom wrapper with the correct task name
+        env = dmc.ContinualCartPole(
+            task=dmc_task_name, # This passes "balance", not "cartpole_balance"
+            action_repeat=config.action_repeat,
+            size=config.size,
+            seed=config.seed + id
+        )
+        env = wrappers.NormalizeActions(env)
+        env = wrappers.TimeLimit(env, config.time_limit)
+        env = wrappers.SelectAction(env, key="action")
+        env = wrappers.UUID(env)
+        return env
+    # ------------------------------------------------------
+
+    # Standard Dreamer logic for other suites
     suite, task = config.task.split("_", 1)
     if suite == "dmc":
         import envs.dmc as dmc
@@ -309,9 +335,53 @@ def main(config):
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
         agent._should_pretrain._once = False
 
+    # Initialize CRL state if configured
+    crl_active = hasattr(config, "crl_tasks")
+    if crl_active:
+        current_task_idx = 0
+        crl_tasks = config.crl_tasks
+        steps_per_task = config.crl_steps_per_task
+        print(f"[CRL] Continual Learning Mode Active. Schedule: {crl_tasks}, Switch every {steps_per_task} steps.")
+
     # make sure eval will be executed once after config.steps
     while agent._step < config.steps + config.eval_every:
         logger.write()
+        # --- DYNAMIC TASK SWITCHING ---
+        if crl_active:
+            # Calculate expected task index based on step count
+            # --- FIX: Offset by prefill so Task 0 starts AFTER prefill ---
+            # If agent._step is 2500 and prefill is 2500, effective_step is 0.
+            # Task 0 will run from step 2500 to 3500.
+            prefill_steps = getattr(config, "prefill", 0)
+            effective_step = max(0, agent._step - prefill_steps)
+            
+            expected_idx = int(effective_step // steps_per_task)
+            
+            # Clamp to the last task if we run past the schedule
+            if expected_idx >= len(crl_tasks):
+                expected_idx = len(crl_tasks) - 1
+            
+            # --- FIX: These lines must be OUTSIDE the 'if' above ---
+            desired_task_id = crl_tasks[expected_idx]
+            
+            # Apply to all envs
+            for env in train_envs:
+                # Unwrap to find ContinualCartPole
+                real_env = env
+                while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+                    if hasattr(real_env, "set_task"):
+                        break
+                    real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
+                
+                # Check if we found it and if it needs an update
+                if hasattr(real_env, "set_task"):
+                    # Check against the env's actual internal state
+                    current_phase = getattr(real_env, "task_phase", -1)
+                    
+                    if current_phase != desired_task_id:
+                        print(f"\n[CRL] Step {agent._step}: Switching dynamics to Task {desired_task_id}\n")
+                        real_env.set_task(desired_task_id)
+        # ------------------------------
         if config.eval_episode_num > 0:
             print("Start evaluation.")
             eval_policy = functools.partial(agent, training=False)

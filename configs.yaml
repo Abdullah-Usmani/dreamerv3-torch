@@ -157,6 +157,25 @@ dmc_vision:
   encoder: { mlp_keys: "$^", cnn_keys: "image" }
   decoder: { mlp_keys: "$^", cnn_keys: "image" }
 
+dmc_crl:
+  crl_tasks: [0, 1, 2, 3] # 0:Std, 1:Wind, 2:Moon, 3:Jupiter
+  crl_steps_per_task: 100000 # Switch every 100k steps
+  # task: "dmc_crl_cartpole_balance"
+  # env: "dmc_crl"
+  # --- CRL SPECIFIC ---
+  # Standard DreamerV3 params
+  steps: 5e5
+  action_repeat: 2
+  # time_limit: 1000
+  # --------------------
+  eval_every: 10000
+  log_every: 10000
+  prefill: 2500
+  train_ratio: 512
+  video_pred_log: true
+  encoder: { mlp_keys: "$^", cnn_keys: "image" }
+  decoder: { mlp_keys: "$^", cnn_keys: "image" }
+
 crafter:
   task: crafter_reward
   step: 1e6

@@ -74,104 +74,119 @@ class DeepMindControl:
             raise ValueError("Only render mode 'rgb_array' is supported.")
         return self._env.physics.render(*self._size, camera_id=self._camera)
 
-
 class ContinualCartPole:
     def __init__(self, task="balance", action_repeat=1, size=(64, 64), seed=0):
-        # Load the standard DM Control Cartpole
-        
-        # Add the MuJoCo_GL = glfw setting
+        # Ensure we use GLFW for rendering on Windows
         os.environ["MUJOCO_GL"] = "glfw"
-
+        
         self._env = suite.load("cartpole", task, task_kwargs={"random": seed})
         self._action_repeat = action_repeat
         self._size = size
         self.camera_id = 0
         
-        # --- CONTINUAL LEARNING STATE ---
-        self.task_phase = 0  # 0: Standard, 1: Windy, 2: Heavy, 3: Low Gravity
+        # Continual Learning State
+        self.task_phase = 0
         self._wind_force = 0.0
-        
-        # Cache original physics values to allow resetting
         self._orig_gravity = self._env.physics.model.opt.gravity.copy()
-        # "pole_1" is the name of the pole geom in dm_control cartpole.xml
-        self._orig_mass = self._env.physics.named.model.body_mass["pole_1"].copy()
 
     def set_task(self, task_id):
-        """
-        Call this method to switch the dynamics of the environment.
-        Task 0: Standard
-        Task 1: Windy (External force applied to pole)
-        Task 2: Heavy Pole (Mass increased)
-        Task 3: Low Gravity (Moon gravity)
-        """
+        """Switches the physics dynamics of the environment."""
         self.task_phase = task_id
         
-        # Reset to defaults first
+        # Reset physics to baseline
         self._env.physics.model.opt.gravity[:] = self._orig_gravity
-        self._env.physics.named.model.body_mass["pole_1"] = self._orig_mass
         self._wind_force = 0.0
 
-        # Apply Task Dynamics
-        if task_id == 1: # WINDY
-            # Will apply force in self.step()
-            self._wind_force = 1.0  # Adjust magnitude as needed
-            print(f"SWITCHED TO TASK {task_id}: WINDY")
-            
-        elif task_id == 2: # HEAVY POLE
-            # Double the mass of the pole
-            self._env.physics.named.model.body_mass["pole_1"] = self._orig_mass * 3.0
-            print(f"SWITCHED TO TASK {task_id}: HEAVY POLE")
-            
-        elif task_id == 3: # LOW GRAVITY
-            # Reduce gravity by half
-            self._env.physics.model.opt.gravity[2] = -4.0 # Standard is -9.81
-            print(f"SWITCHED TO TASK {task_id}: LOW GRAVITY")
-            
+        if task_id == 0:
+            print(f"[Continual] Task {task_id}: Standard")
+        elif task_id == 1:
+            self._wind_force = 1.0
+            print(f"[Continual] Task {task_id}: Windy")
+        elif task_id == 2:
+            # Moon Gravity (approx 1/6 of Earth)
+            self._env.physics.model.opt.gravity[2] = -1.62
+            print(f"[Continual] Task {task_id}: Moon Gravity")
+        elif task_id == 3:
+            # High Gravity
+            self._env.physics.model.opt.gravity[2] = -25.0
+            print(f"[Continual] Task {task_id}: Jupiter Gravity")
+
+        # --- VERIFICATION BLOCK ---
+        # Read values DIRECTLY from the physics engine to confirm they changed
+        current_gravity = self._env.physics.model.opt.gravity[2]
+        print(f"   > CONFIRMED GRAVITY (Z): {current_gravity}")
+        
+        if self._wind_force > 0:
+            print(f"   > CONFIRMED WIND FORCE SETTING: {self._wind_force} (Will apply on step)")
         else:
-            print(f"SWITCHED TO TASK {task_id}: STANDARD")
+            print(f"   > CONFIRMED WIND: None")
+        print("--------------------------------------------------\n")
 
     def step(self, action):
-        # Normalize action (Dreamer outputs [-1, 1])
         action = np.clip(action, -1.0, 1.0)
+        reward = 0
         
-        total_reward = 0.0
         for _ in range(self._action_repeat):
-            # --- APPLY WIND FORCE ---
-            if self.task_phase == 1 and self._wind_force != 0.0:
-                # Apply varying wind force to the pole's center of mass
-                # We use a sine wave to make it 'gusty' or constant for steady wind
-                # named.data.xfrc_applied index: [force_x, force_y, force_z, torque_x, torque_y, torque_z]
-                # Applying Force in X direction
-                self._env.physics.named.data.xfrc_applied["pole_1", 0] = self._wind_force * np.random.normal(1.0, 0.5)
+            # Apply Wind Force if active
+            if self._wind_force != 0.0:
+                self._env.physics.named.data.xfrc_applied["pole_1", 0] = self._wind_force
             
             time_step = self._env.step(action)
-            
-            if time_step.reward is not None:
-                total_reward += time_step.reward
+            reward += time_step.reward or 0
             if time_step.last():
                 break
         
+        # --- VERIFICATION (Print once per 1000 steps to avoid spam) ---
+        # We check xfrc_applied on the pole to see if the engine registered the force
+        if self._wind_force != 0.0 and np.random.rand() < 0.001: 
+            actual_force = self._env.physics.named.data.xfrc_applied["pole_1", 0]
+            print(f"[PHYSICS CHECK] Step wind force on pole: {actual_force}")
+
         obs = self._get_obs(time_step)
         done = time_step.last()
-        return obs, total_reward, done, {}
-
-    def _get_obs(self, time_step):
-        # Render image for Dreamer
-        img = self._env.physics.render(height=self._size[0], width=self._size[1], camera_id=self.camera_id)
-        return img.transpose(2, 0, 1) # Channel-first for PyTorch
+        
+        # Add discount info for Dreamer
+        info = {"discount": np.array(time_step.discount, np.float32)}
+        return obs, reward, done, info
 
     def reset(self):
         time_step = self._env.reset()
         return self._get_obs(time_step)
 
+    def _get_obs(self, time_step):
+        # Get raw vector obs from DM Control
+        obs = dict(time_step.observation)
+        # Ensure values are at least 1D arrays
+        obs = {key: [val] if np.isscalar(val) else val for key, val in obs.items()}
+        
+        # Add Image Observation (Channels-Last: 64, 64, 3)
+        obs["image"] = self.render()
+        
+        # Add Dreamer-specific flags
+        # In DMC, first() is true at reset. discount==0 means terminal/crash.
+        obs["is_terminal"] = False if time_step.first() else time_step.discount == 0
+        obs["is_first"] = time_step.first()
+        
+        return obs
+
+    def render(self, mode="rgb_array"):
+        # Returns (H, W, 3)
+        return self._env.physics.render(*self._size, camera_id=self.camera_id)
+
     @property
     def observation_space(self):
-        # Mock space for Dreamer init
-        import gym
-        return gym.spaces.Box(low=0, high=255, shape=(3, self._size[0], self._size[1]), dtype=np.uint8)
+        spaces = {}
+        # Replicate vector spaces from underlying env
+        for key, value in self._env.observation_spec().items():
+            shape = (1,) if len(value.shape) == 0 else value.shape
+            spaces[key] = gym.spaces.Box(-np.inf, np.inf, shape, dtype=np.float32)
+        
+        # Image Space: (64, 64, 3) -> Channels LAST
+        spaces["image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
+        
+        return gym.spaces.Dict(spaces)
 
     @property
     def action_space(self):
-        import gym
         spec = self._env.action_spec()
-        return gym.spaces.Box(low=spec.minimum, high=spec.maximum, dtype=np.float32)
+        return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
