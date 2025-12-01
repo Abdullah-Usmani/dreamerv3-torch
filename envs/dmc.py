@@ -81,7 +81,10 @@ class ContinualCartPole:
         
         self._env = suite.load("cartpole", task, task_kwargs={"random": seed})
         self._action_repeat = action_repeat
-        self._size = size
+        # --- FIX: Ensure size is a tuple so we can add (3,) to it later ---
+        # self._size = size
+        self._size = tuple(size) 
+        # ------------------------------------------------------------------
         self.camera_id = 0
         
         # Continual Learning State

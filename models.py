@@ -1,4 +1,5 @@
 import copy
+import numpy as np
 import torch
 from torch import nn
 
@@ -25,6 +26,7 @@ class RewardEMA:
         offset = ema_vals[0]
         return offset.detach(), scale.detach()
 
+from detector import ChangeDetector
 
 class WorldModel(nn.Module):
     def __init__(self, obs_space, act_space, step, config):
@@ -32,6 +34,11 @@ class WorldModel(nn.Module):
         self._step = step
         self._use_amp = True if config.precision == 16 else False
         self._config = config
+        
+        # [LLCD] Initialize the Library Wrapper
+        # config.dyn_deter is the size of the GRU memory (usually 512)
+        self.change_detector = ChangeDetector(input_dim=config.dyn_deter)
+        self.adapting = False
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
         self.encoder = networks.MultiEncoder(shapes, **config.encoder)
         self.embed_size = self.encoder.outdim
@@ -118,12 +125,41 @@ class WorldModel(nn.Module):
                 post, prior = self.dynamics.observe(
                     embed, data["action"], data["is_first"]
                 )
+                # --- [LLCD] Change Detection Step ---
+                # We feed the Deterministic State (GRU memory) to the detector.
+                # post['deter'] shape: [Batch, Time, Dim]
+                # We use the mean of the batch at the last time step as the environment signal.
+                current_deter = post["deter"][:, -1, :].mean(dim=0) 
+                
+                # Update detector (returns True if change detected)
+                has_changed, change_score = self.change_detector.update(current_deter)
+                
+                if has_changed:
+                    print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {change_score:.2f}")
+                    self.adapting = True
+                    self.change_detector.reset()
+                
+                # Optional: Decay adaptation flag after 1 step (or keep for a window)
+                # For strict LLCD, you keep it 'True' for a few steps. 
+                # Here we simplify: if detector fires, we spike the loss for this batch.
+                # ------------------------------------
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
                 rep_scale = self._config.rep_scale
                 kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
                     post, prior, kl_free, dyn_scale, rep_scale
                 )
+                # --- [LLCD] Adaptation Regularization ---
+                # If adapting, we heavily penalize the Dynamics Loss (KL divergence).
+                # This forces the model to prioritize fitting the *new* transition dynamics
+                # over preserving the old prior.
+                if self.adapting:
+                    adapt_weight = 10.0  # Hyperparameter: Strength of adaptation
+                    dyn_loss = dyn_loss * adapt_weight 
+                    
+                    # Reset flag (assuming single-step adaptation impulse)
+                    self.adapting = False 
+                # ----------------------------------------
                 assert kl_loss.shape == embed.shape[:2], kl_loss.shape
                 preds = {}
                 for name, head in self.heads.items():
@@ -172,10 +208,18 @@ class WorldModel(nn.Module):
 
     # this function is called during both rollout and training
     def preprocess(self, obs):
+        # --- FIX: Only call .copy() on numpy arrays (like images) ---
+        # Python bools (is_first, is_terminal) don't have .copy()
         obs = {
-            k: torch.tensor(v, device=self._config.device, dtype=torch.float32)
+            k: torch.tensor(
+                v.copy() if isinstance(v, np.ndarray) else v, 
+                device=self._config.device, 
+                dtype=torch.float32
+            )
             for k, v in obs.items()
         }
+        # ------------------------------------------------------------
+        
         obs["image"] = obs["image"] / 255.0
         if "discount" in obs:
             obs["discount"] *= self._config.discount
@@ -210,7 +254,6 @@ class WorldModel(nn.Module):
         error = (model - truth + 1.0) / 2.0
 
         return torch.cat([truth, model, error], 2)
-
 
 class ImagBehavior(nn.Module):
     def __init__(self, config, world_model):
