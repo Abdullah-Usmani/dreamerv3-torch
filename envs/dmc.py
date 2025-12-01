@@ -114,13 +114,13 @@ class ContinualCartPole:
         # --- VERIFICATION BLOCK ---
         # Read values DIRECTLY from the physics engine to confirm they changed
         current_gravity = self._env.physics.model.opt.gravity[2]
-        print(f"   > CONFIRMED GRAVITY (Z): {current_gravity}")
+        # print(f"   > CONFIRMED GRAVITY (Z): {current_gravity}")
         
-        if self._wind_force > 0:
-            print(f"   > CONFIRMED WIND FORCE SETTING: {self._wind_force} (Will apply on step)")
-        else:
-            print(f"   > CONFIRMED WIND: None")
-        print("--------------------------------------------------\n")
+        # if self._wind_force > 0:
+        #     print(f"   > CONFIRMED WIND FORCE SETTING: {self._wind_force} (Will apply on step)")
+        # else:
+        #     print(f"   > CONFIRMED WIND: None")
+        # print("--------------------------------------------------\n")
 
     def step(self, action):
         action = np.clip(action, -1.0, 1.0)
@@ -140,7 +140,7 @@ class ContinualCartPole:
         # We check xfrc_applied on the pole to see if the engine registered the force
         if self._wind_force != 0.0 and np.random.rand() < 0.001: 
             actual_force = self._env.physics.named.data.xfrc_applied["pole_1", 0]
-            print(f"[PHYSICS CHECK] Step wind force on pole: {actual_force}")
+            # print(f"[PHYSICS CHECK] Step wind force on pole: {actual_force}")
 
         obs = self._get_obs(time_step)
         done = time_step.last()

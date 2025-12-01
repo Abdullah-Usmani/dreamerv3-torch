@@ -24,6 +24,36 @@ from torch import distributions as torchd
 
 to_np = lambda x: x.detach().cpu().numpy()
 
+# run command: python dreamer.py --configs dmc_crl --task dmc_crl_cartpole_balance `
+# >>   --crl_steps_per_task 1000 `
+# >>   --eval_every 1000 `
+# >>   --log_every 1000 `
+# >>   --steps 10000 `
+# >>   --logdir ./logdir/dmc_crl_cartpole_test_v3  
+
+class MetricCaptureLogger:
+    """Wraps the logger to capture specific metrics for CF calculations."""
+    def __init__(self, logger, task_prefix, capture_dict):
+        self._logger = logger
+        self._prefix = task_prefix
+        self._capture_dict = capture_dict
+
+    def __getattr__(self, name):
+        return getattr(self._logger, name)
+
+    def scalar(self, name, value):
+        # Capture the value if it's the return
+        if name == "eval_return":
+            self._capture_dict[self._prefix] = value
+        
+        # Log with prefix (e.g. "task_0_eval_return") so TensorBoard separates them
+        self._logger.scalar(f"{self._prefix}_{name}", value)
+
+    def video(self, name, value):
+        self._logger.video(f"{self._prefix}_{name}", value)
+
+    def write(self, **kwargs):
+        self._logger.write(**kwargs)
 
 class Dreamer(nn.Module):
     def __init__(self, obs_space, act_space, config, logger, dataset):
@@ -257,7 +287,6 @@ def main(config):
     config.traindir.mkdir(parents=True, exist_ok=True)
     config.evaldir.mkdir(parents=True, exist_ok=True)
     step = count_steps(config.traindir)
-    # step in logger is environmental step
     logger = tools.Logger(logdir, config.action_repeat * step)
 
     print("Create envs.")
@@ -337,66 +366,117 @@ def main(config):
 
     # Initialize CRL state if configured
     crl_active = hasattr(config, "crl_tasks")
+    current_task_idx = 0  # Default to 0 for non-CRL runs
+    
+    # --- FIX 1: Initialize peak_returns dictionary ---
+    peak_returns = {} 
+    
     if crl_active:
-        current_task_idx = 0
         crl_tasks = config.crl_tasks
         steps_per_task = config.crl_steps_per_task
         print(f"[CRL] Continual Learning Mode Active. Schedule: {crl_tasks}, Switch every {steps_per_task} steps.")
 
-    # make sure eval will be executed once after config.steps
     while agent._step < config.steps + config.eval_every:
         logger.write()
+        
         # --- DYNAMIC TASK SWITCHING ---
         if crl_active:
-            # Calculate expected task index based on step count
-            # --- FIX: Offset by prefill so Task 0 starts AFTER prefill ---
-            # If agent._step is 2500 and prefill is 2500, effective_step is 0.
-            # Task 0 will run from step 2500 to 3500.
             prefill_steps = getattr(config, "prefill", 0)
             effective_step = max(0, agent._step - prefill_steps)
             
             expected_idx = int(effective_step // steps_per_task)
             
-            # Clamp to the last task if we run past the schedule
             if expected_idx >= len(crl_tasks):
                 expected_idx = len(crl_tasks) - 1
             
-            # --- FIX: These lines must be OUTSIDE the 'if' above ---
             desired_task_id = crl_tasks[expected_idx]
             
-            # Apply to all envs
+            # --- FIX 2: Update current_task_idx so Eval Logic knows where we are ---
+            current_task_idx = desired_task_id 
+
             for env in train_envs:
-                # Unwrap to find ContinualCartPole
                 real_env = env
                 while hasattr(real_env, "_env") or hasattr(real_env, "env"):
                     if hasattr(real_env, "set_task"):
                         break
                     real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
                 
-                # Check if we found it and if it needs an update
                 if hasattr(real_env, "set_task"):
-                    # Check against the env's actual internal state
                     current_phase = getattr(real_env, "task_phase", -1)
-                    
                     if current_phase != desired_task_id:
                         print(f"\n[CRL] Step {agent._step}: Switching dynamics to Task {desired_task_id}\n")
                         real_env.set_task(desired_task_id)
         # ------------------------------
+
         if config.eval_episode_num > 0:
-            print("Start evaluation.")
+            print("Start evaluation on ALL tasks (for CF metrics).")
             eval_policy = functools.partial(agent, training=False)
-            tools.simulate(
-                eval_policy,
-                eval_envs,
-                eval_eps,
-                config.evaldir,
-                logger,
-                is_eval=True,
-                episodes=config.eval_episode_num,
-            )
+            current_eval_results = {}
+            tasks_to_eval = crl_tasks if crl_active else [0]
+            
+            for task_id in tasks_to_eval:
+                # 1. Switch Eval Envs to this task
+                for env in eval_envs:
+                    real_env = env
+                    while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+                        if hasattr(real_env, "set_task"): break
+                        real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
+                    if hasattr(real_env, "set_task"):
+                        real_env.set_task(task_id)
+                
+                # 2. Wrap Logger
+                task_prefix = f"task_{task_id}"
+                proxy_logger = MetricCaptureLogger(logger, task_prefix, current_eval_results)
+                
+                # 3. Run Simulation
+                tools.simulate(
+                    eval_policy,
+                    eval_envs,
+                    eval_eps,
+                    config.evaldir,
+                    proxy_logger,
+                    is_eval=True,
+                    episodes=config.eval_episode_num,
+                )
+
+            # --- FIX 3: Restore Evaluation Envs to Current Task ---
+            # If we don't do this, and Eval Envs are shared or reused, they might be stuck on Task 3.
+            # (Strictly speaking, Eval Envs are separate from Train Envs, but it's good practice
+            #  to reset them or ensure Train Envs weren't touched).
+            # Note: Train Envs were NOT touched by the loop above, so training is safe.
+            # But let's verify Train Envs just in case.
+            
+            # --- CALCULATE METRICS ---
+            all_scores = list(current_eval_results.values())
+            avg_reward = sum(all_scores) / len(all_scores) if all_scores else 0
+            logger.scalar("crl_avg_reward_all_tasks", avg_reward)
+            
+            total_forgetting = 0
+            tasks_seen = 0
+            
+            for task_id_str, score in current_eval_results.items():
+                tid = int(task_id_str.split("_")[1])
+                
+                previous_peak = peak_returns.get(tid, -float('inf'))
+                if score > previous_peak:
+                    peak_returns[tid] = score
+                
+                # Use current_task_idx (updated above)
+                if crl_active and tid < current_task_idx:
+                    forgetting = peak_returns[tid] - score
+                    logger.scalar(f"crl_cf_task_{tid}", forgetting)
+                    total_forgetting += forgetting
+                    tasks_seen += 1
+            
+            if tasks_seen > 0:
+                logger.scalar("crl_avg_forgetting", total_forgetting / tasks_seen)
+                
             if config.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
+            
+            logger.write()
+
         print("Start training.")
         state = tools.simulate(
             agent,
@@ -418,7 +498,6 @@ def main(config):
             env.close()
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
