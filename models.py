@@ -38,7 +38,7 @@ class WorldModel(nn.Module):
         # [LLCD] Initialize the Library Wrapper
         # config.dyn_deter is the size of the GRU memory (usually 512)
         self.change_detector = ChangeDetector(input_dim=config.dyn_deter)
-        self.adapting = False
+        self.adaptation_timer = 0  # <--- ADD THIS
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
         self.encoder = networks.MultiEncoder(shapes, **config.encoder)
         self.embed_size = self.encoder.outdim
@@ -125,24 +125,21 @@ class WorldModel(nn.Module):
                 post, prior = self.dynamics.observe(
                     embed, data["action"], data["is_first"]
                 )
-                # --- [LLCD] Change Detection Step ---
-                # We feed the Deterministic State (GRU memory) to the detector.
-                # post['deter'] shape: [Batch, Time, Dim]
-                # We use the mean of the batch at the last time step as the environment signal.
-                current_deter = post["deter"][:, -1, :].mean(dim=0) 
+
+                # --- [LLCD] DETECT CHANGE ---
+                # Take mean of deterministic state [Batch, Time, Dim] -> [Dim]
+                # Use the last time step for detection
+                current_deter = post["deter"][:, -1, :].mean(dim=0)
                 
-                # Update detector (returns True if change detected)
-                has_changed, change_score = self.change_detector.update(current_deter)
+                # Check for change
+                has_changed, score = self.change_detector.update(current_deter)
                 
                 if has_changed:
-                    print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {change_score:.2f}")
-                    self.adapting = True
-                    self.change_detector.reset()
-                
-                # Optional: Decay adaptation flag after 1 step (or keep for a window)
-                # For strict LLCD, you keep it 'True' for a few steps. 
-                # Here we simplify: if detector fires, we spike the loss for this batch.
-                # ------------------------------------
+                    print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {score:.2f} | Triggering 50-step Adaptation.")
+                    self.adaptation_timer = 50  # Set window length
+                    self.change_detector.reset() # Reset stats for the new task
+                # ----------------------------
+
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
                 rep_scale = self._config.rep_scale
@@ -180,7 +177,18 @@ class WorldModel(nn.Module):
                     key: value * self._scales.get(key, 1.0)
                     for key, value in losses.items()
                 }
-                model_loss = sum(scaled.values()) + kl_loss
+                
+                # --- [LLCD] APPLY ADAPTATION ---
+                # If timer is active, boost Dynamics Loss (KL) to force rapid learning
+                total_loss = sum(scaled.values()) + kl_loss
+                
+                if self.adaptation_timer > 0:
+                    adapt_weight = 10.0
+                    total_loss += adapt_weight * dyn_loss
+                    self.adaptation_timer -= 1
+                
+                model_loss = total_loss
+                # -------------------------------
             metrics = self._model_opt(torch.mean(model_loss), self.parameters())
 
         metrics.update({f"{name}_loss": to_np(loss) for name, loss in losses.items()})

@@ -3,90 +3,82 @@ from scipy.stats import t
 
 class ChangeDetector:
     """
-    Manual Implementation of Bayesian Online Change Point Detection (BOCPD).
-    Optimized for high-dimensional vectors using Diagonal Covariance (Fast).
+    Adaptive BOCPD with 3-Sigma Thresholding (Faithful to LLCD Paper).
     """
-    def __init__(self, input_dim, threshold=0.3, hazard=0.01):
+    def __init__(self, input_dim):
         self.input_dim = input_dim
-        self.threshold = threshold
-        self.hazard = hazard
         
-        # Initialize Priors (Normal-Gamma for unknown mean & precision)
-        self.reset()
-
-    def reset(self):
-        # T = Current Run Length
-        # We track parameters for run lengths r=0, r=1, ... r=t
-        # To keep it fast, we only track the "most likely" run length (approximate)
-        # or we track the sufficient statistics for the current segment.
+        # 1. Detection Statistics (Student-T Logic)
+        self.n = 0
+        self.mean = np.zeros(input_dim)
+        self.sum_sq = np.zeros(input_dim)
         
-        # Sufficient Statistics for the current segment
-        self.n = 0              # Count
-        self.mean = np.zeros(self.input_dim)
-        self.sum_sq = np.zeros(self.input_dim) # Sum of squares
-        
-        # Score smoothing
-        self.change_prob = 0.0
+        # 2. Adaptive Threshold Statistics (3-Sigma Logic)
+        # We track the history of the 'scores' themselves to find outliers
+        self.score_history = [] 
+        self.score_mean = 0.0
+        self.score_std = 1.0 # Initialize non-zero to avoid div/0
+        self.history_window = 100 # Moving window for adaptability
 
     def update(self, deter_state):
-        """
-        Input: deter_state (Tensor or Numpy array)
-        Output: (bool is_change, float score)
-        """
-        # 1. Convert to Numpy
+        # --- 1. Calculate Raw Anomaly Score (Same as before) ---
         if hasattr(deter_state, 'detach'):
             x = deter_state.detach().cpu().numpy()
         else:
             x = deter_state
-            
-        # Handle Batch: Take mean if batch dimension exists
         if x.ndim > 1:
-            x = x.mean(axis=0) # [512]
+            x = x.mean(axis=0)
             
-        # 2. Calculate Predictive Probability (Student-T)
-        # We calculate the probability of this new point 'x' belonging to the 
-        # current distribution we have been tracking.
-        
         score = 0.0
-        
-        if self.n > 2:
-            # We have enough data to form a belief
-            # Posterior parameters
+        if self.n > 5:
+            # Student-T NLL Calculation
             df = self.n - 1
-            
-            # Variance calculation (Welford's algorithm style or direct)
-            # var = (sum_sq - n * mean^2) / (n - 1)
             var = (self.sum_sq - self.n * (self.mean**2)) / (self.n - 1)
-            var = np.maximum(var, 1e-6) # Avoid division by zero
+            var = np.maximum(var, 1e-6)
             scale = np.sqrt(var * (1 + 1/self.n))
-            
-            # Calculate negative log likelihood (Anomaly Score)
-            # Higher NLL = Lower probability = Higher chance of change
-            # We sum NLL across dimensions (assuming diagonal/independent dims)
-            
-            # Standardize x
             t_score = (x - self.mean) / scale
-            
-            # Student-T Log PDF
-            # log_pdf = t.logpdf(x, df, loc=self.mean, scale=scale)
-            # Using t_score simplifies:
             log_pdf = t.logpdf(t_score, df) - np.log(scale)
-            
-            # The "Change Score" is the negative log probability averaged over dims
-            score = -np.mean(log_pdf)
-        
-        # 3. Update Statistics with new point
+            score = -np.mean(log_pdf) # Raw Anomaly Score
+
+        # Update Distribution Stats
         self.n += 1
         delta = x - self.mean
         self.mean += delta / self.n
         self.sum_sq += x**2
         
-        # 4. Determine Change
-        # Simple threshold logic on the Negative Log Likelihood
+        # --- 2. Adaptive Decision (The 3-Sigma Rule) ---
         is_change = False
         
-        # Heuristic: If the score spikes significantly above the threshold
-        if score > self.threshold and self.n > 10: # Wait for burn-in (10 steps)
-            is_change = True
+        # We need a "Burn-in" period to learn what normal noise looks like
+        if self.n > 20:
+            # Calculate Z-Score: How many sigmas away is this score?
+            z_score = (score - self.score_mean) / (self.score_std + 1e-8)
             
+            # The "3-Sigma" Rule (LLCD Method)
+            # If the score is 3 standard deviations higher than average -> CHANGE
+            if z_score > 3.0: 
+                is_change = True
+        
+        # Update Score History (Rolling Window)
+        # We only update stats if it's NOT a change (to avoid polluting "normal" stats with anomalies)
+        if not is_change:
+            self.score_history.append(score)
+            if len(self.score_history) > self.history_window:
+                self.score_history.pop(0)
+            
+            # Recalculate Score Stats
+            if len(self.score_history) > 2:
+                self.score_mean = np.mean(self.score_history)
+                self.score_std = np.std(self.score_history)
+
         return is_change, score
+
+    def reset(self):
+        # When a change is confirmed, we reset the Distribution Stats
+        # BUT we keep the Score Stats (Score history) to maintain threshold stability?
+        # Actually, LLCD resets the "Run Length", which implies resetting the distribution belief.
+        
+        self.n = 0
+        self.mean = np.zeros(self.input_dim)
+        self.sum_sq = np.zeros(self.input_dim)
+        # We do NOT reset score_history, because we still need to know what "scores" generally look like.
