@@ -29,5 +29,5 @@ def calculate_convergence(log_file, threshold=300):
     return convergence_results
 
 if __name__ == "__main__":
-    log_path = "./logdir/dmc_crl_cartpole_test_v3/metrics.jsonl"
+    log_path = "./logdir/dmc_crl_cartpole_full_run_2/metrics.jsonl"
     calculate_convergence(log_path, threshold=400)

@@ -29,6 +29,7 @@ defaults:
   reward_EMA: True
 
   # Model
+  llcd: False # <--- ADD THIS LINE (Default is OFF/Original)
   dyn_hidden: 512
   dyn_deter: 512
   dyn_stoch: 32

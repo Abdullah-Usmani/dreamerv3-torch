@@ -36,9 +36,14 @@ class WorldModel(nn.Module):
         self._config = config
         
         # [LLCD] Initialize the Library Wrapper
+        is_llcd_on = getattr(config, "llcd", False)
+        print(f"-------- WORLD MODEL INITIALIZED --------")
+        print(f"LLCD ADAPTATION MODE: {'✅ ON' if is_llcd_on else '❌ OFF'}")
+        print(f"-----------------------------------------")
         # config.dyn_deter is the size of the GRU memory (usually 512)
         self.change_detector = ChangeDetector(input_dim=config.dyn_deter)
-        self.adaptation_timer = 0  # <--- ADD THIS
+        self.adapting = False       # <--- ADD THIS LINE
+        self.adaptation_timer = 0   # <--- Keep this if using the timer logic
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
         self.encoder = networks.MultiEncoder(shapes, **config.encoder)
         self.embed_size = self.encoder.outdim
@@ -127,17 +132,20 @@ class WorldModel(nn.Module):
                 )
 
                 # --- [LLCD] DETECT CHANGE ---
-                # Take mean of deterministic state [Batch, Time, Dim] -> [Dim]
-                # Use the last time step for detection
-                current_deter = post["deter"][:, -1, :].mean(dim=0)
-                
-                # Check for change
-                has_changed, score = self.change_detector.update(current_deter)
-                
-                if has_changed:
-                    print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {score:.2f} | Triggering 50-step Adaptation.")
-                    self.adaptation_timer = 50  # Set window length
-                    self.change_detector.reset() # Reset stats for the new task
+                # Use the timer
+                if getattr(self._config, "llcd", False) and self.adaptation_timer > 0:
+                    # ... apply loss ...
+                    # Take mean of deterministic state [Batch, Time, Dim] -> [Dim]
+                    # Use the last time step for detection
+                    current_deter = post["deter"][:, -1, :].mean(dim=0)
+                    
+                    # Check for change
+                    has_changed, score = self.change_detector.update(current_deter)
+                    
+                    if has_changed:
+                        print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {score:.2f} | Triggering 50-step Adaptation.")
+                        self.adaptation_timer = 50  # Set window length
+                        self.change_detector.reset() # Reset stats for the new task
                 # ----------------------------
 
                 kl_free = self._config.kl_free
@@ -182,7 +190,7 @@ class WorldModel(nn.Module):
                 # If timer is active, boost Dynamics Loss (KL) to force rapid learning
                 total_loss = sum(scaled.values()) + kl_loss
                 
-                if self.adaptation_timer > 0:
+                if getattr(self._config, "llcd", False) and self.adapting:
                     adapt_weight = 10.0
                     total_loss += adapt_weight * dyn_loss
                     self.adaptation_timer -= 1
