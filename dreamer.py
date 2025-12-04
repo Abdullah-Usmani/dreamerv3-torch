@@ -392,13 +392,18 @@ def main(config):
     while agent._step < config.steps + config.eval_every:
         logger.write()
         
-        # --- DYNAMIC TASK SWITCHING ---
+    # --- DYNAMIC TASK SWITCHING ---
         if crl_active:
+            # 1. Define an offset to "Zero" the clock at the restart point
+            # Change this number to whatever step to start a NEW run from (e.g. 14000)
+            manual_offset = 0 
+            
+            # 2. Subtract prefill AND the manual offset
             prefill_steps = getattr(config, "prefill", 0)
-            effective_step = max(0, agent._step - prefill_steps)
+            effective_step = max(0, agent._step - prefill_steps - manual_offset)
             
             expected_idx = int(effective_step // steps_per_task)
-            
+
             if expected_idx >= len(crl_tasks):
                 expected_idx = len(crl_tasks) - 1
             

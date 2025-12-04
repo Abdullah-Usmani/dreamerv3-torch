@@ -241,16 +241,16 @@ class Damy:
         return lambda: self._env.reset()
     
     # --- NEW: Forward call method to inner env ---
-    def call(self, name, *args, **kwargs):
+def call(self, name, *args, **kwargs):
         # Unwrap manually since Damy doesn't use multiprocessing
         real_env = self._env
         while hasattr(real_env, "_env") or hasattr(real_env, "env"):
             if hasattr(real_env, name):
                 method = getattr(real_env, name)
-                return lambda: method(*args, **kwargs)
+                return method(*args, **kwargs) # <--- EXECUTE IMMEDIATELY
             real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
         
         if hasattr(real_env, name):
             method = getattr(real_env, name)
-            return lambda: method(*args, **kwargs)
+            return method(*args, **kwargs) # <--- EXECUTE IMMEDIATELY
         raise AttributeError(f"Method {name} not found.")

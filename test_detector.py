@@ -55,7 +55,7 @@ def test_detection(config, checkpoint_path=None):
     # 3. Test Loop
     print("\n--- STARTING SIMULATION ---")
     print("Phase 1: Task 0 (Standard Gravity) for 500 steps")
-    print("Phase 2: Task 3 (Jupiter Gravity) for 500 steps")
+    print("Phase 2: Task 1 (Windy) for 500 steps")
     
     obs = env.reset()
     state = None
@@ -70,8 +70,8 @@ def test_detection(config, checkpoint_path=None):
     for t in range(1000):
         # --- THE INTERVENTION ---
         if t == 500:
-            print("\n[TEST] 🚨 FORCE SWITCHING GRAVITY TO JUPITER (Task 3) 🚨\n")
-            env.set_task(3) 
+            print("\n[TEST] 🚨 FORCE SWITCHING GRAVITY TO WINDY (Task 1) 🚨\n")
+            env.set_task(1) 
         
         # 1. Preprocess Obs
         obs_tensor = agent._wm.preprocess(obs)

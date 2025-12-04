@@ -215,7 +215,7 @@ dmc_crl_walker_proprio:
   action_repeat: 4
 
   # Speed Optimizations (Proprioception)
-  envs: 4
+  envs: 1
   train_ratio: 32
   video_pred_log: false
 
@@ -229,7 +229,8 @@ dmc_crl_walker_proprio:
   # 400k / 4 tasks = 100k Agent Steps per Task
   steps: 1600000
   crl_tasks: [0, 1, 2, 3]
-  crl_steps_per_task: 200000
+  # crl_steps_per_task: 200000
+  crl_steps_per_task: 25000
 
   # Evaluation
   eval_every: 25000 # Every 50k Env Steps
