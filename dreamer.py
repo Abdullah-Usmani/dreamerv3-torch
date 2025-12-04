@@ -174,30 +174,45 @@ def make_dataset(episodes, config):
 
 
 def make_env(config, mode, id):
-# --- FIX: Custom parsing for Continual Learning Suite ---
+    # --- FIX: Custom parsing for Continual Learning Suite ---
     if config.task.startswith("dmc_crl"):
-        # Format: dmc_crl_cartpole_balance
-        # We need to extract: "balance"
+        # Example: "dmc_crl_walker_walk" -> ['dmc', 'crl', 'walker', 'walk']
         parts = config.task.split("_")
-        # parts = ['dmc', 'crl', 'cartpole', 'balance']
         
-        # The DM Control task name is the LAST part
-        dmc_task_name = parts[-1] 
+        domain = parts[2]      # "walker" or "cartpole"
+        task_name = parts[3]   # "walk" or "balance"
         
         import envs.dmc as dmc
-        # Initialize our custom wrapper with the correct task name
-        env = dmc.ContinualCartPole(
-            task=dmc_task_name, # This passes "balance", not "cartpole_balance"
-            action_repeat=config.action_repeat,
-            size=config.size,
-            seed=config.seed + id
-        )
+        
+        # Determine if we are doing Vision or Proprioception
+        # If 'image' is in the encoder keys, we enable rendering.
+        # If not (e.g., dmc_proprio config), we disable it for speed.
+        use_vision = "image" in config.encoder.get("cnn_keys", [])
+        
+        if domain == "cartpole":
+            env = dmc.ContinualCartPole(
+                task=task_name, 
+                action_repeat=config.action_repeat,
+                size=config.size,
+                seed=config.seed + id,
+                vision=use_vision
+            )
+        elif domain == "walker":
+            env = dmc.ContinualWalker(
+                task=task_name,
+                action_repeat=config.action_repeat,
+                size=config.size,
+                seed=config.seed + id,
+                vision=use_vision
+            )
+        else:
+            raise NotImplementedError(f"Unknown CRL domain: {domain}")
+
         env = wrappers.NormalizeActions(env)
         env = wrappers.TimeLimit(env, config.time_limit)
         env = wrappers.SelectAction(env, key="action")
         env = wrappers.UUID(env)
         return env
-    # ------------------------------------------------------
 
     # Standard Dreamer logic for other suites
     suite, task = config.task.split("_", 1)
@@ -364,21 +379,15 @@ def main(config):
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
         agent._should_pretrain._once = False
 
-    # Initialize CRL state if configured
+    # --- CRL INITIALIZATION ---
     crl_active = hasattr(config, "crl_tasks")
-    current_task_idx = 0  # Default to 0 for non-CRL runs
-    
-    # --- FIX 1: Initialize peak_returns dictionary ---
-    peak_returns = {} 
+    current_task_idx = -1  # Start at -1 to force initial update
+    peak_returns = {}      # Track best performance per task
     
     if crl_active:
-            # # --- TEST MODIFICATION: SHOCK SCHEDULE ---
-            # crl_tasks = [0, 3]  # Standard -> Jupiter (Massive change)
-            # print(f"[TEST] Using Shock Schedule: {crl_tasks}")
-            # # -----------------------------------------
-            
-            crl_tasks = config.crl_tasks
-            steps_per_task = config.crl_steps_per_task
+        crl_tasks = config.crl_tasks
+        steps_per_task = config.crl_steps_per_task
+        print(f"[CRL] Continual Learning Mode Active. Schedule: {crl_tasks}, Switch every {steps_per_task} steps.")
 
     while agent._step < config.steps + config.eval_every:
         logger.write()
@@ -395,26 +404,29 @@ def main(config):
             
             desired_task_id = crl_tasks[expected_idx]
             
-            # --- FIX 2: Update current_task_idx so Eval Logic knows where we are ---
-            current_task_idx = desired_task_id 
-
-            for env in train_envs:
-                # Case 1: Communication Wrapper (Parallel or Damy with .call)
-                if hasattr(env, "call"):
-                    env.call("set_task", desired_task_id)
-                    
-                # Case 2: Direct Object Access (Fallback)
-                else:
-                    real_env = env
-                    # Unwrap until we find the method or hit the bottom
-                    while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+            # Only update if the task has CHANGED
+            if current_task_idx != desired_task_id:
+                print(f"\n[CRL] Step {agent._step}: Switching dynamics to Task {desired_task_id}\n", flush=True)
+                
+                # Update all training environments
+                for env in train_envs:
+                    # Case 1: Parallel / Damy Wrapper
+                    if hasattr(env, "call"):
+                        env.call("set_task", desired_task_id)
+                        
+                    # Case 2: Standard Wrapper (Fallback)
+                    else:
+                        real_env = env
+                        while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+                            if hasattr(real_env, "set_task"):
+                                break
+                            real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
+                        
                         if hasattr(real_env, "set_task"):
-                            break
-                        real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
-                    
-                    # Apply task if found
-                    if hasattr(real_env, "set_task"):
-                        real_env.set_task(desired_task_id)
+                            real_env.set_task(desired_task_id)
+                            
+                # Update local tracker
+                current_task_idx = desired_task_id
         # ------------------------------
 
         if config.eval_episode_num > 0:
@@ -426,12 +438,15 @@ def main(config):
             for task_id in tasks_to_eval:
                 # 1. Switch Eval Envs to this task
                 for env in eval_envs:
-                    real_env = env
-                    while hasattr(real_env, "_env") or hasattr(real_env, "env"):
-                        if hasattr(real_env, "set_task"): break
-                        real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
-                    if hasattr(real_env, "set_task"):
-                        real_env.set_task(task_id)
+                    if hasattr(env, "call"):
+                         env.call("set_task", task_id)
+                    else:
+                        real_env = env
+                        while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+                            if hasattr(real_env, "set_task"): break
+                            real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
+                        if hasattr(real_env, "set_task"):
+                            real_env.set_task(task_id)
                 
                 # 2. Wrap Logger
                 task_prefix = f"task_{task_id}"
@@ -448,13 +463,6 @@ def main(config):
                     episodes=config.eval_episode_num,
                 )
 
-            # --- FIX 3: Restore Evaluation Envs to Current Task ---
-            # If we don't do this, and Eval Envs are shared or reused, they might be stuck on Task 3.
-            # (Strictly speaking, Eval Envs are separate from Train Envs, but it's good practice
-            #  to reset them or ensure Train Envs weren't touched).
-            # Note: Train Envs were NOT touched by the loop above, so training is safe.
-            # But let's verify Train Envs just in case.
-            
             # --- CALCULATE METRICS ---
             all_scores = list(current_eval_results.values())
             avg_reward = sum(all_scores) / len(all_scores) if all_scores else 0
@@ -470,7 +478,7 @@ def main(config):
                 if score > previous_peak:
                     peak_returns[tid] = score
                 
-                # Use current_task_idx (updated above)
+                # Calculate Forgetting only for tasks we have passed
                 if crl_active and tid < current_task_idx:
                     forgetting = peak_returns[tid] - score
                     logger.scalar(f"crl_cf_task_{tid}", forgetting)

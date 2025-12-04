@@ -207,6 +207,39 @@ dmc_crl_fast:
   # encoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
   # decoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
 
+dmc_crl_walker_proprio:
+  # Task Identity
+  task: "dmc_crl_walker_walk"
+
+  # Walker Specifics (Needs faster control frequency)
+  action_repeat: 4
+
+  # Speed Optimizations (Proprioception)
+  envs: 4
+  train_ratio: 32
+  video_pred_log: false
+
+  # Model Size (Walker is harder than CartPole, so slightly larger model)
+  dyn_hidden: 200
+  dyn_deter: 200
+  units: 200
+
+  # CRL Schedule (Adjusted for Repeat 2)
+  # 800k Env Steps / 2 = 400k Agent Steps
+  # 400k / 4 tasks = 100k Agent Steps per Task
+  steps: 1600000
+  crl_tasks: [0, 1, 2, 3]
+  crl_steps_per_task: 200000
+
+  # Evaluation
+  eval_every: 25000 # Every 50k Env Steps
+  eval_episode_num: 5
+  log_every: 10000
+  prefill: 2500
+
+  # Encoders (Vector Only)
+  encoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
+
 crafter:
   task: crafter_reward
   step: 1e6
@@ -299,24 +332,6 @@ memorymaze:
   actor: { dist: "onehot", std: "none" }
   imag_gradient: "reinforce"
   task: "memorymaze_9x9"
-
-gym_proprio:
-  steps: 5e5
-  action_repeat: 2
-  envs: 4
-  train_ratio: 512
-  video_pred_log: false
-  encoder: { mlp_keys: ".*", cnn_keys: "$^" }
-  decoder: { mlp_keys: ".*", cnn_keys: "$^" }
-
-gym_vision:
-  steps: 1e6
-  action_repeat: 2
-  envs: 4
-  train_ratio: 512
-  video_pred_log: true
-  encoder: { mlp_keys: "$^", cnn_keys: "image" }
-  decoder: { mlp_keys: "$^", cnn_keys: "image" }
 
 debug:
   debug: True

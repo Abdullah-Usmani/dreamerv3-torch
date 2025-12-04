@@ -238,7 +238,8 @@ class WorldModel(nn.Module):
         }
         # ------------------------------------------------------------
         
-        obs["image"] = obs["image"] / 255.0
+        if "image" in obs:
+            obs["image"] = obs["image"] / 255.0
         if "discount" in obs:
             obs["discount"] *= self._config.discount
             # (batch_size, batch_length) -> (batch_size, batch_length, 1)

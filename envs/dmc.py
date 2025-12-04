@@ -74,8 +74,102 @@ class DeepMindControl:
             raise ValueError("Only render mode 'rgb_array' is supported.")
         return self._env.physics.render(*self._size, camera_id=self._camera)
 
+class ContinualWalker:
+    def __init__(self, task="walk", action_repeat=2, size=(64, 64), seed=0, vision=True):
+        os.environ["MUJOCO_GL"] = "glfw"
+        self._env = suite.load("walker", task, task_kwargs={"random": seed})
+        self._action_repeat = action_repeat
+        self._size = tuple(size)
+        self._vision = vision # <--- This enables Proprioception speed
+        self.camera_id = 0
+        
+        # Continual Learning State
+        self.task_phase = 0
+        self._wind_force = 0.0
+        self._orig_gravity = self._env.physics.model.opt.gravity.copy()
+
+    def set_task(self, task_id):
+        """Switch Physics for Walker."""
+        self.task_phase = task_id
+        
+        # Reset to Baseline
+        self._env.physics.model.opt.gravity[:] = self._orig_gravity
+        self._wind_force = 0.0
+
+        print(f"[ContinualWalker] Setting Task {task_id}...")
+
+        if task_id == 0:
+            pass # Standard
+        elif task_id == 1:
+            # Walker is heavier/sturdier than CartPole, so we need more wind force
+            self._wind_force = 5.0 
+            print(f"   > Task 1: Windy (Force {self._wind_force}N)")
+        elif task_id == 2:
+            self._env.physics.model.opt.gravity[2] = -1.62
+            print("   > Task 2: Moon Gravity")
+        elif task_id == 3:
+            self._env.physics.model.opt.gravity[2] = -25.0
+            print("   > Task 3: Jupiter Gravity")
+
+    def step(self, action):
+        action = np.clip(action, -1.0, 1.0)
+        reward = 0
+        
+        for _ in range(self._action_repeat):
+            # --- APPLY WIND TO TORSO ---
+            if self._wind_force != 0.0:
+                self._env.physics.named.data.xfrc_applied["torso", 0] = self._wind_force
+            
+            time_step = self._env.step(action)
+            reward += time_step.reward or 0
+            if time_step.last():
+                break
+        
+        obs = self._get_obs(time_step)
+        done = time_step.last()
+        info = {"discount": np.array(time_step.discount, np.float32)}
+        return obs, reward, done, info
+
+    def _get_obs(self, time_step):
+        # 1. Get Proprioceptive Data (Vectors)
+        obs = dict(time_step.observation)
+        obs = {key: [val] if np.isscalar(val) else val for key, val in obs.items()}
+        
+        # 2. Only Render if Vision is ON
+        if self._vision:
+            obs["image"] = self.render()
+            
+        obs["is_terminal"] = False if time_step.first() else time_step.discount == 0
+        obs["is_first"] = time_step.first()
+        return obs
+
+    def reset(self):
+        time_step = self._env.reset()
+        return self._get_obs(time_step)
+    
+    def render(self, mode="rgb_array"):
+        return self._env.physics.render(*self._size, camera_id=self.camera_id)
+
+    @property
+    def observation_space(self):
+        spaces = {}
+        for key, value in self._env.observation_spec().items():
+            shape = (1,) if len(value.shape) == 0 else value.shape
+            spaces[key] = gym.spaces.Box(-np.inf, np.inf, shape, dtype=np.float32)
+        
+        # Only declare image space if vision is enabled
+        if self._vision:
+            spaces["image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
+            
+        return gym.spaces.Dict(spaces)
+
+    @property
+    def action_space(self):
+        spec = self._env.action_spec()
+        return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
+
 class ContinualCartPole:
-    def __init__(self, task="balance", action_repeat=1, size=(64, 64), seed=0):
+    def __init__(self, task="balance", action_repeat=1, size=(64, 64), seed=0, vision=True):
         # Ensure we use GLFW for rendering on Windows
         os.environ["MUJOCO_GL"] = "glfw"
         
@@ -86,6 +180,7 @@ class ContinualCartPole:
         self._size = tuple(size) 
         # ------------------------------------------------------------------
         self.camera_id = 0
+        self._vision = vision
         
         # Continual Learning State
         self.task_phase = 0
@@ -116,7 +211,7 @@ class ContinualCartPole:
 
         # --- VERIFICATION BLOCK ---
         # Read values DIRECTLY from the physics engine to confirm they changed
-        current_gravity = self._env.physics.model.opt.gravity[2]
+        # current_gravity = self._env.physics.model.opt.gravity[2]
         # print(f"   > CONFIRMED GRAVITY (Z): {current_gravity}")
         
         # if self._wind_force > 0:
@@ -141,8 +236,8 @@ class ContinualCartPole:
         
         # --- VERIFICATION (Print once per 1000 steps to avoid spam) ---
         # We check xfrc_applied on the pole to see if the engine registered the force
-        if self._wind_force != 0.0 and np.random.rand() < 0.001: 
-            actual_force = self._env.physics.named.data.xfrc_applied["pole_1", 0]
+        # if self._wind_force != 0.0 and np.random.rand() < 0.001: 
+            # actual_force = self._env.physics.named.data.xfrc_applied["pole_1", 0]
             # print(f"[PHYSICS CHECK] Step wind force on pole: {actual_force}")
 
         obs = self._get_obs(time_step)
@@ -163,7 +258,8 @@ class ContinualCartPole:
         obs = {key: [val] if np.isscalar(val) else val for key, val in obs.items()}
         
         # Add Image Observation (Channels-Last: 64, 64, 3)
-        obs["image"] = self.render()
+        if self._vision:
+            obs["image"] = self.render()
         
         # Add Dreamer-specific flags
         # In DMC, first() is true at reset. discount==0 means terminal/crash.
@@ -185,7 +281,8 @@ class ContinualCartPole:
             spaces[key] = gym.spaces.Box(-np.inf, np.inf, shape, dtype=np.float32)
         
         # Image Space: (64, 64, 3) -> Channels LAST
-        spaces["image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
+        if self._vision:
+            spaces["image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
         
         return gym.spaces.Dict(spaces)
 
