@@ -188,7 +188,7 @@ dmc_crl_fast:
   envs: 1
   # envs: 4 # 4 Parallel Envs
   train_ratio: 512
-  video_pred_log: false # Disable video logging
+  video_pred_log: true # Disable video logging
 
   # Evaluation
   eval_every: 10000 # Check progress every 10k steps

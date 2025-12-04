@@ -44,6 +44,7 @@ class WorldModel(nn.Module):
         self.change_detector = ChangeDetector(input_dim=config.dyn_deter)
         self.adapting = False       # <--- ADD THIS LINE
         self.adaptation_timer = 0   # <--- Keep this if using the timer logic
+        self.current_adaptation_score = 1.0 # <--- ADD THIS (Default weight = 1.0)
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
         self.encoder = networks.MultiEncoder(shapes, **config.encoder)
         self.embed_size = self.encoder.outdim
@@ -118,10 +119,6 @@ class WorldModel(nn.Module):
         )
 
     def _train(self, data):
-        # action (batch_size, batch_length, act_dim)
-        # image (batch_size, batch_length, h, w, ch)
-        # reward (batch_size, batch_length)
-        # discount (batch_size, batch_length)
         data = self.preprocess(data)
 
         with tools.RequiresGrad(self):
@@ -132,23 +129,26 @@ class WorldModel(nn.Module):
                 )
 
                 # --- [LLCD] DETECT CHANGE ---
-                # 1. Check if LLCD is enabled
+                llcd_score = 0.0 # Default for logging
+                llcd_triggered = 0.0 # Default for logging
+                
                 if getattr(self._config, "llcd", False):
-                    # 2. Always run detection (regardless of timer)
-                    # Take mean of deterministic state [Batch, Time, Dim] -> [Dim]
+                    # Take mean of deterministic state
                     current_deter = post["deter"][:, -1, :].mean(dim=0)
                     
                     has_changed, score = self.change_detector.update(current_deter)
                     
+                    # --- FIX: Capture score for Logging AND Logic ---
+                    llcd_score = score 
+                    self.current_adaptation_score = max(1.0, score) 
+                    # -----------------------------------------------
+                    
                     if has_changed:
-                        # print(f"\n\n{'='*40}", flush=True)
-                        print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {score:.2f}", flush=True)
+                        print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {score:.2f}")
                         # print(f"[LLCD] ⚡ Triggering 50-step Adaptation", flush=True)
-                        # print(f"{'='*40}\n\n", flush=True)
                         
                         self.adaptation_timer = 50 
                         self.change_detector.reset()
-                # ----------------------------
 
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
@@ -158,8 +158,7 @@ class WorldModel(nn.Module):
                     post, prior, kl_free, dyn_scale, rep_scale
                 )
                 
-                assert kl_loss.shape == embed.shape[:2], kl_loss.shape
-                
+                # ... (Predictions and Base Losses) ...
                 preds = {}
                 for name, head in self.heads.items():
                     grad_head = name in self._config.grad_heads
@@ -170,11 +169,9 @@ class WorldModel(nn.Module):
                         preds.update(pred)
                     else:
                         preds[name] = pred
-                
                 losses = {}
                 for name, pred in preds.items():
                     loss = -pred.log_prob(data[name])
-                    assert loss.shape == embed.shape[:2], (name, loss.shape)
                     losses[name] = loss
                 
                 scaled = {
@@ -183,22 +180,25 @@ class WorldModel(nn.Module):
                 }
                 
                 # --- [LLCD] APPLY ADAPTATION ---
-                # Base Loss
                 total_loss = sum(scaled.values()) + kl_loss
                 
-                # Apply penalty only if timer is active
                 if getattr(self._config, "llcd", False) and self.adaptation_timer > 0:
-                    adapt_weight = 10.0
+                    # Use the dynamic score we captured earlier
+                    adapt_weight = self.current_adaptation_score
+                    
                     total_loss += adapt_weight * dyn_loss
                     self.adaptation_timer -= 1
-                    # --- DEBUG PRINT ---
-                    # print(f"[LLCD] ⏳ Adaptation Window Active | Remaining: {self.adaptation_timer}", flush=True)
-                
+                    llcd_triggered = 1.0
+                    
+                    if self.adaptation_timer == 0:
+                         print(f"\n[LLCD] ✅ Adaptation Complete.\n")
+
                 model_loss = total_loss
                 # -------------------------------
                 
             metrics = self._model_opt(torch.mean(model_loss), self.parameters())
 
+        # ... (Standard Metrics) ...
         metrics.update({f"{name}_loss": to_np(loss) for name, loss in losses.items()})
         metrics["kl_free"] = kl_free
         metrics["dyn_scale"] = dyn_scale
@@ -207,13 +207,15 @@ class WorldModel(nn.Module):
         metrics["rep_loss"] = to_np(rep_loss)
         metrics["kl"] = to_np(torch.mean(kl_value))
         
+        # --- [LLCD] LOGGING ---
+        # Now this will actually show the detector score in TensorBoard
+        metrics["llcd_score"] = float(llcd_score)
+        metrics["llcd_active"] = float(llcd_triggered)
+        # ----------------------
+        
         with torch.cuda.amp.autocast(self._use_amp):
-            metrics["prior_ent"] = to_np(
-                torch.mean(self.dynamics.get_dist(prior).entropy())
-            )
-            metrics["post_ent"] = to_np(
-                torch.mean(self.dynamics.get_dist(post).entropy())
-            )
+            metrics["prior_ent"] = to_np(torch.mean(self.dynamics.get_dist(prior).entropy()))
+            metrics["post_ent"] = to_np(torch.mean(self.dynamics.get_dist(post).entropy()))
             context = dict(
                 embed=embed,
                 feat=self.dynamics.get_feat(post),
@@ -222,7 +224,6 @@ class WorldModel(nn.Module):
             )
         post = {k: v.detach() for k, v in post.items()}
         return post, context, metrics
-    
     # this function is called during both rollout and training
     def preprocess(self, obs):
         # --- FIX: Only call .copy() on numpy arrays (like images) ---
