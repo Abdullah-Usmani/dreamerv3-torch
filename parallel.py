@@ -31,17 +31,48 @@ class Parallel:
     def close(self):
         self.worker.close()
 
+    # --- NEW: Explicit call method for passing commands like set_task ---
+    def call(self, name, *args, **kwargs):
+        return self.worker(PMessage.CALL, name, *args, **kwargs)()
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _respond(ctor, state, message, name, *args, **kwargs):
         state = state or ctor
         if message == PMessage.CALLABLE:
             assert not args and not kwargs, (args, kwargs)
-            result = callable(getattr(state, name))
+            # Check if attribute exists and is callable
+            attr = getattr(state, name, None)
+            if attr is None:
+                # Try unwrapping if not found on top level
+                real_env = state
+                while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+                    real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
+                    if hasattr(real_env, name):
+                        attr = getattr(real_env, name)
+                        break
+            result = callable(attr)
+            
         elif message == PMessage.CALL:
-            result = getattr(state, name)(*args, **kwargs)
+            attr = getattr(state, name, None)
+            if attr is None:
+                # Try unwrapping for the actual call
+                real_env = state
+                while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+                    real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
+                    if hasattr(real_env, name):
+                        attr = getattr(real_env, name)
+                        break
+            
+            if attr is None:
+                raise AttributeError(f"Method '{name}' not found in environment stack.")
+            
+            result = attr(*args, **kwargs)
+            
         elif message == PMessage.READ:
             assert not args and not kwargs, (args, kwargs)
             result = getattr(state, name)
+            
         return state, result
 
 
@@ -110,7 +141,8 @@ class ProcessPipeWorker:
             self._process.join(0.1)
             if self._process.exitcode is None:
                 try:
-                    os.kill(self._process.pid, 9)
+                    import signal
+                    os.kill(self._process.pid, signal.SIGTERM)
                     time.sleep(0.1)
                 except Exception:
                     pass
@@ -207,3 +239,18 @@ class Damy:
 
     def reset(self):
         return lambda: self._env.reset()
+    
+    # --- NEW: Forward call method to inner env ---
+    def call(self, name, *args, **kwargs):
+        # Unwrap manually since Damy doesn't use multiprocessing
+        real_env = self._env
+        while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+            if hasattr(real_env, name):
+                method = getattr(real_env, name)
+                return lambda: method(*args, **kwargs)
+            real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
+        
+        if hasattr(real_env, name):
+            method = getattr(real_env, name)
+            return lambda: method(*args, **kwargs)
+        raise AttributeError(f"Method {name} not found.")

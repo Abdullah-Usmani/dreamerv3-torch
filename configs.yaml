@@ -14,7 +14,7 @@ defaults:
   reset_every: 0
   device: "cuda:0"
   compile: True
-  precision: 32
+  precision: 16
   debug: False
   video_pred_log: True
 
@@ -176,6 +176,36 @@ dmc_crl:
   video_pred_log: true
   encoder: { mlp_keys: "$^", cnn_keys: "image" }
   decoder: { mlp_keys: "$^", cnn_keys: "image" }
+
+dmc_crl_fast:
+  # CRL Specifics
+  crl_tasks: [0, 1, 2, 3]
+  crl_steps_per_task: 25000 # 25k Agent Steps = 100k Env Steps
+
+  # Base settings from dmc_proprio (No Images)
+  steps: 4e5 # Total Env Steps (100k per task)
+  action_repeat: 4 # 2x Speedup (Standard is 2)
+  envs: 1
+  # envs: 4 # 4 Parallel Envs
+  train_ratio: 512
+  video_pred_log: false # Disable video logging
+
+  # Evaluation
+  eval_every: 10000 # Check progress every 10k steps
+  eval_episode_num: 10 # Faster eval (5 eps instead of 10)
+  log_every: 10000
+  prefill: 2500
+
+  # Model Size Reduction (2.5x Speedup)
+  # dyn_hidden: 200 # Down from 512
+  # dyn_deter: 200 # Down from 512
+  # units: 200 # Down from 512
+
+  # Proprioception Encoders (No CNN)
+  encoder: { mlp_keys: "$^", cnn_keys: "image" }
+  decoder: { mlp_keys: "$^", cnn_keys: "image" }
+  # encoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
+  # decoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
 
 crafter:
   task: crafter_reward

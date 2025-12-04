@@ -372,9 +372,13 @@ def main(config):
     peak_returns = {} 
     
     if crl_active:
-        crl_tasks = config.crl_tasks
-        steps_per_task = config.crl_steps_per_task
-        print(f"[CRL] Continual Learning Mode Active. Schedule: {crl_tasks}, Switch every {steps_per_task} steps.")
+            # # --- TEST MODIFICATION: SHOCK SCHEDULE ---
+            # crl_tasks = [0, 3]  # Standard -> Jupiter (Massive change)
+            # print(f"[TEST] Using Shock Schedule: {crl_tasks}")
+            # # -----------------------------------------
+            
+            crl_tasks = config.crl_tasks
+            steps_per_task = config.crl_steps_per_task
 
     while agent._step < config.steps + config.eval_every:
         logger.write()
@@ -395,16 +399,21 @@ def main(config):
             current_task_idx = desired_task_id 
 
             for env in train_envs:
-                real_env = env
-                while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+                # Case 1: Communication Wrapper (Parallel or Damy with .call)
+                if hasattr(env, "call"):
+                    env.call("set_task", desired_task_id)
+                    
+                # Case 2: Direct Object Access (Fallback)
+                else:
+                    real_env = env
+                    # Unwrap until we find the method or hit the bottom
+                    while hasattr(real_env, "_env") or hasattr(real_env, "env"):
+                        if hasattr(real_env, "set_task"):
+                            break
+                        real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
+                    
+                    # Apply task if found
                     if hasattr(real_env, "set_task"):
-                        break
-                    real_env = getattr(real_env, "_env", getattr(real_env, "env", None))
-                
-                if hasattr(real_env, "set_task"):
-                    current_phase = getattr(real_env, "task_phase", -1)
-                    if current_phase != desired_task_id:
-                        print(f"\n[CRL] Step {agent._step}: Switching dynamics to Task {desired_task_id}\n")
                         real_env.set_task(desired_task_id)
         # ------------------------------
 

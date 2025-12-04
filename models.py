@@ -132,40 +132,34 @@ class WorldModel(nn.Module):
                 )
 
                 # --- [LLCD] DETECT CHANGE ---
-                # Use the timer
-                if getattr(self._config, "llcd", False) and self.adaptation_timer > 0:
-                    # ... apply loss ...
+                # 1. Check if LLCD is enabled
+                if getattr(self._config, "llcd", False):
+                    # 2. Always run detection (regardless of timer)
                     # Take mean of deterministic state [Batch, Time, Dim] -> [Dim]
-                    # Use the last time step for detection
                     current_deter = post["deter"][:, -1, :].mean(dim=0)
                     
-                    # Check for change
                     has_changed, score = self.change_detector.update(current_deter)
                     
                     if has_changed:
-                        print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {score:.2f} | Triggering 50-step Adaptation.")
-                        self.adaptation_timer = 50  # Set window length
-                        self.change_detector.reset() # Reset stats for the new task
+                        # print(f"\n\n{'='*40}", flush=True)
+                        print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {score:.2f}", flush=True)
+                        # print(f"[LLCD] ⚡ Triggering 50-step Adaptation", flush=True)
+                        # print(f"{'='*40}\n\n", flush=True)
+                        
+                        self.adaptation_timer = 50 
+                        self.change_detector.reset()
                 # ----------------------------
 
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
                 rep_scale = self._config.rep_scale
+                
                 kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
                     post, prior, kl_free, dyn_scale, rep_scale
                 )
-                # --- [LLCD] Adaptation Regularization ---
-                # If adapting, we heavily penalize the Dynamics Loss (KL divergence).
-                # This forces the model to prioritize fitting the *new* transition dynamics
-                # over preserving the old prior.
-                if self.adapting:
-                    adapt_weight = 10.0  # Hyperparameter: Strength of adaptation
-                    dyn_loss = dyn_loss * adapt_weight 
-                    
-                    # Reset flag (assuming single-step adaptation impulse)
-                    self.adapting = False 
-                # ----------------------------------------
+                
                 assert kl_loss.shape == embed.shape[:2], kl_loss.shape
+                
                 preds = {}
                 for name, head in self.heads.items():
                     grad_head = name in self._config.grad_heads
@@ -176,27 +170,33 @@ class WorldModel(nn.Module):
                         preds.update(pred)
                     else:
                         preds[name] = pred
+                
                 losses = {}
                 for name, pred in preds.items():
                     loss = -pred.log_prob(data[name])
                     assert loss.shape == embed.shape[:2], (name, loss.shape)
                     losses[name] = loss
+                
                 scaled = {
                     key: value * self._scales.get(key, 1.0)
                     for key, value in losses.items()
                 }
                 
                 # --- [LLCD] APPLY ADAPTATION ---
-                # If timer is active, boost Dynamics Loss (KL) to force rapid learning
+                # Base Loss
                 total_loss = sum(scaled.values()) + kl_loss
                 
-                if getattr(self._config, "llcd", False) and self.adapting:
+                # Apply penalty only if timer is active
+                if getattr(self._config, "llcd", False) and self.adaptation_timer > 0:
                     adapt_weight = 10.0
                     total_loss += adapt_weight * dyn_loss
                     self.adaptation_timer -= 1
+                    # --- DEBUG PRINT ---
+                    # print(f"[LLCD] ⏳ Adaptation Window Active | Remaining: {self.adaptation_timer}", flush=True)
                 
                 model_loss = total_loss
                 # -------------------------------
+                
             metrics = self._model_opt(torch.mean(model_loss), self.parameters())
 
         metrics.update({f"{name}_loss": to_np(loss) for name, loss in losses.items()})
@@ -206,6 +206,7 @@ class WorldModel(nn.Module):
         metrics["dyn_loss"] = to_np(dyn_loss)
         metrics["rep_loss"] = to_np(rep_loss)
         metrics["kl"] = to_np(torch.mean(kl_value))
+        
         with torch.cuda.amp.autocast(self._use_amp):
             metrics["prior_ent"] = to_np(
                 torch.mean(self.dynamics.get_dist(prior).entropy())
@@ -221,7 +222,7 @@ class WorldModel(nn.Module):
             )
         post = {k: v.detach() for k, v in post.items()}
         return post, context, metrics
-
+    
     # this function is called during both rollout and training
     def preprocess(self, obs):
         # --- FIX: Only call .copy() on numpy arrays (like images) ---
