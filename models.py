@@ -42,9 +42,9 @@ class WorldModel(nn.Module):
         print(f"-----------------------------------------")
         # config.dyn_deter is the size of the GRU memory (usually 512)
         self.change_detector = ChangeDetector(input_dim=config.dyn_deter)
-        self.adapting = False       # <--- ADD THIS LINE
-        self.adaptation_timer = 0   # <--- Keep this if using the timer logic
-        self.current_adaptation_score = 1.0 # <--- ADD THIS (Default weight = 1.0)
+        self.adaptation_timer = 0
+        self.current_adaptation_score = 0.0 # For weighting
+        self.llcd_score_log = 0.0           # For tensorboard
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
         self.encoder = networks.MultiEncoder(shapes, **config.encoder)
         self.embed_size = self.encoder.outdim
@@ -128,27 +128,10 @@ class WorldModel(nn.Module):
                     embed, data["action"], data["is_first"]
                 )
 
-                # --- [LLCD] DETECT CHANGE ---
-                llcd_score = 0.0 # Default for logging
-                llcd_triggered = 0.0 # Default for logging
-                
-                if getattr(self._config, "llcd", False):
-                    # Take mean of deterministic state
-                    current_deter = post["deter"][:, -1, :].mean(dim=0)
-                    
-                    has_changed, score = self.change_detector.update(current_deter)
-                    
-                    # --- FIX: Capture score for Logging AND Logic ---
-                    llcd_score = score 
-                    self.current_adaptation_score = max(1.0, score) 
-                    # -----------------------------------------------
-                    
-                    if has_changed:
-                        print(f"[LLCD] 🚨 CHANGE DETECTED! Score: {score:.2f}")
-                        # print(f"[LLCD] ⚡ Triggering 50-step Adaptation", flush=True)
-                        
-                        self.adaptation_timer = 50 
-                        self.change_detector.reset()
+                # --- [LLCD] NO DETECTION HERE ---
+                # We only READ the state set by dreamer.py
+                llcd_triggered = 0.0
+                # --------------------------------
 
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
@@ -158,7 +141,7 @@ class WorldModel(nn.Module):
                     post, prior, kl_free, dyn_scale, rep_scale
                 )
                 
-                # ... (Predictions and Base Losses) ...
+                # ... (Predictions logic remains same) ...
                 preds = {}
                 for name, head in self.heads.items():
                     grad_head = name in self._config.grad_heads
@@ -179,23 +162,29 @@ class WorldModel(nn.Module):
                     for key, value in losses.items()
                 }
                 
-                # --- [LLCD] APPLY ADAPTATION ---
+                # --- [LLCD] APPLY ADAPTATION (Loss Only) ---
                 total_loss = sum(scaled.values()) + kl_loss
                 
                 if getattr(self._config, "llcd", False) and self.adaptation_timer > 0:
-                    # Use the dynamic score we captured earlier
-                    adapt_weight = self.current_adaptation_score
+                    # Use the score captured by _policy
+                    # Technique 2: Z-Score Scaling (or simple linear scaling)
+                    # We use the stored score to determine urgency
+                    score = getattr(self, "current_adaptation_score", 1.0)
+                    
+                    # Weight Logic: 1.0 + Score (clamped at 20)
+                    raw_weight = 1.0 + max(0.0, score)
+                    adapt_weight = min(raw_weight, 20.0)
                     
                     total_loss += adapt_weight * dyn_loss
                     self.adaptation_timer -= 1
                     llcd_triggered = 1.0
                     
                     if self.adaptation_timer == 0:
-                         print(f"\n[LLCD] ✅ Adaptation Complete.\n")
-
-                model_loss = total_loss
-                # -------------------------------
+                         print(f"[LLCD] ✅ Adaptation Complete.", flush=True)
                 
+                model_loss = total_loss
+                # -------------------------------------------
+
             metrics = self._model_opt(torch.mean(model_loss), self.parameters())
 
         # ... (Standard Metrics) ...
@@ -208,9 +197,13 @@ class WorldModel(nn.Module):
         metrics["kl"] = to_np(torch.mean(kl_value))
         
         # --- [LLCD] LOGGING ---
-        # Now this will actually show the detector score in TensorBoard
-        metrics["llcd_score"] = float(llcd_score)
+        # Log the score that triggered the current state
+        metrics["llcd_score"] = float(getattr(self, "llcd_score_log", 0.0))
         metrics["llcd_active"] = float(llcd_triggered)
+        
+        # Optional: Log Run Length if using that detector version
+        if hasattr(self.change_detector, 'n'):
+             metrics["llcd_run_length"] = float(self.change_detector.n)
         # ----------------------
         
         with torch.cuda.amp.autocast(self._use_amp):
@@ -223,8 +216,7 @@ class WorldModel(nn.Module):
                 postent=self.dynamics.get_dist(post).entropy(),
             )
         post = {k: v.detach() for k, v in post.items()}
-        return post, context, metrics
-    # this function is called during both rollout and training
+        return post, context, metrics# this function is called during both rollout and training
     def preprocess(self, obs):
         # --- FIX: Only call .copy() on numpy arrays (like images) ---
         # Python bools (is_first, is_terminal) don't have .copy()

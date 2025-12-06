@@ -120,7 +120,30 @@ class Dreamer(nn.Module):
             latent, action = state
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
+        
+        # 1. Forward the dynamics
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
+        
+        # --- [LLCD] DETECT ON LIVE DATA (Correct Place) ---
+        # We detect here because 'latent' is the sequence of what is happening NOW.
+        if getattr(self._config, "llcd", False) and training:
+            # Extract deterministic state [Batch, Dim]
+            deter = latent["deter"]
+            
+            # Update detector
+            has_changed, score = self._wm.change_detector.update(deter)
+            
+            # Save score for logging/weighting in _train
+            self._wm.current_adaptation_score = score 
+            self._wm.llcd_score_log = score # Helper for logging
+            
+            if has_changed:
+                print(f"[LLCD] 🚨 LIVE DETECT! Score: {score:.2f} | Adapting...", flush=True)
+                # Trigger the adaptation window
+                self._wm.adaptation_timer = 50 
+                self._wm.change_detector.reset()
+        # --------------------------------------------------
+
         if self._config.eval_state_mean:
             latent["stoch"] = latent["mean"]
         feat = self._wm.dynamics.get_feat(latent)
@@ -392,21 +415,17 @@ def main(config):
     while agent._step < config.steps + config.eval_every:
         logger.write()
         
-    # --- DYNAMIC TASK SWITCHING ---
+        # --- DYNAMIC TASK SWITCHING ---
         if crl_active:
-            # 1. Define an offset to "Zero" the clock at the restart point
-            # Change this number to whatever step to start a NEW run from (e.g. 14000)
-            manual_offset = 0 
             
-            # 2. Subtract prefill AND the manual offset
             prefill_steps = getattr(config, "prefill", 0)
-            effective_step = max(0, agent._step - prefill_steps - manual_offset)
-            
-            expected_idx = int(effective_step // steps_per_task)
+            effective_step = max(0, agent._step - prefill_steps)
+            cycle_length = steps_per_task * len(crl_tasks)
+            cycle_step = effective_step % cycle_length
+            expected_idx = cycle_step // steps_per_task
 
-            if expected_idx >= len(crl_tasks):
-                expected_idx = len(crl_tasks) - 1
-            
+            print(f"[CRL] Step {agent._step} | Effective Task: {expected_idx}", flush=True)
+
             desired_task_id = crl_tasks[expected_idx]
             
             # Only update if the task has CHANGED
