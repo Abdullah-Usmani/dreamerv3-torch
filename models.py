@@ -174,13 +174,14 @@ class WorldModel(nn.Module):
                     # Weight Logic: 1.0 + Score (clamped at 20)
                     raw_weight = 1.0 + max(0.0, score)
                     adapt_weight = min(raw_weight, 20.0)
+                    # print(f"Adaptation Weight: {adapt_weight:.2f}", flush=True)
                     
                     total_loss += adapt_weight * dyn_loss
                     self.adaptation_timer -= 1
                     llcd_triggered = 1.0
                     
                     if self.adaptation_timer == 0:
-                         print(f"[LLCD] ✅ Adaptation Complete.", flush=True)
+                         print(f"[LLCD] ✅ Adaptation Complete, Adaptation Weight: {adapt_weight:.2f}", flush=True)
                 
                 model_loss = total_loss
                 # -------------------------------------------

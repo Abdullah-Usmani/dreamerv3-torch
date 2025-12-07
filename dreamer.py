@@ -124,25 +124,25 @@ class Dreamer(nn.Module):
         # 1. Forward the dynamics
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
         
-        # --- [LLCD] DETECT ON LIVE DATA (Correct Place) ---
-        # We detect here because 'latent' is the sequence of what is happening NOW.
+        # --- [LLCD] DETECT ON LIVE DATA ---
         if getattr(self._config, "llcd", False) and training:
-            # Extract deterministic state [Batch, Dim]
             deter = latent["deter"]
-            
-            # Update detector
             has_changed, score = self._wm.change_detector.update(deter)
             
-            # Save score for logging/weighting in _train
-            self._wm.current_adaptation_score = score 
-            self._wm.llcd_score_log = score # Helper for logging
+            # Helper for logging (Always update this to see live status)
+            self._wm.llcd_score_log = score 
             
             if has_changed:
-                print(f"[LLCD] 🚨 LIVE DETECT! Score: {score:.2f} | Adapting...", flush=True)
-                # Trigger the adaptation window
+                print(f"\n[LLCD] 🚨 LIVE DETECT! Score: {score:.2f} | Adapting...", flush=True)
+                
+                # --- FIX: LATCH THE SCORE HERE ---
+                # Only update the weight when a CHANGE is actually detected.
+                # This prevents subsequent non-change steps from overwriting it with 0.0
+                self._wm.current_adaptation_score = score 
+                # ---------------------------------
+                
                 self._wm.adaptation_timer = 50 
                 self._wm.change_detector.reset()
-        # --------------------------------------------------
 
         if self._config.eval_state_mean:
             latent["stoch"] = latent["mean"]
