@@ -167,7 +167,7 @@ class WorldModel(nn.Module):
                 if getattr(self._config, "llcd", False) and self.adaptation_timer > 0:
                     # Retrieve the LATCHED Z-Score from the moment of detection
                     # Default to 1.0 if missing
-                    # z_strength = getattr(self, "latched_z_score", 1.0)
+                    z_strength = getattr(self, "latched_z_score", 1.0)
                     
                     # # Scaling Logic:
                     # # 1. Base Boost: 1.0 (Always double the dynamics importance)
@@ -175,30 +175,25 @@ class WorldModel(nn.Module):
                     # # 3. Safety Cap: 20.0
                     
                     # raw_weight = 1.0 + (z_strength * 2.0)
-                    # adapt_weight = min(raw_weight, 20.0)
+                    raw_weight = z_strength
+                    adapt_weight = min(raw_weight, 20.0)
                     
-                    # # Apply
-                    # total_loss += adapt_weight * dyn_loss
-                    
-                    # self.adaptation_timer -= 1
-                    # llcd_active = 1.0
-
                     score = getattr(self, "current_adaptation_score", 1.0)
                     
                     # Weight Logic: 1.0 + Score (clamped at 20)
-                    raw_weight = 1.0 + max(0.0, score)
-                    adapt_weight = min(raw_weight, 20.0)
-                    # print(f"Adaptation Weight: {adapt_weight:.2f}", flush=True)
+                    # raw_weight = 1.0 + max(0.0, score)
+                    # adapt_weight = min(raw_weight, 20.0)
                     
-                    # total_loss += adapt_weight * dyn_loss
-                    constant_weight = 5.0
-                    total_loss += constant_weight * dyn_loss
+                    # constant_weight = 5.0
+                    # total_loss += constant_weight * dyn_loss
+
+                    total_loss += adapt_weight * dyn_loss
                     self.adaptation_timer -= 1
                     llcd_active = 1.0
                     
                     
                     if self.adaptation_timer == 0:
-                         print(f"[LLCD] ✅ Adaptation Complete. (Adapt Weight: {adapt_weight:.2f} Actual Weight: {constant_weight:.2f} Total Loss: {total_loss})", flush=True)
+                         print(f"[LLCD] ✅ Adaptation Complete. (Adapt Weight: {adapt_weight:.2f} Score Weight: {score:.2f})")
                 
                 model_loss = total_loss
                 # -------------------------------
@@ -215,9 +210,9 @@ class WorldModel(nn.Module):
         metrics["kl"] = to_np(torch.mean(kl_value))
         
         # [LLCD] Logging
+        metrics["llcd_score"] = float(getattr(self, "llcd_score_log", 0.0))
+        metrics["llcd_z_score"] = float(getattr(self, "llcd_z_score_log", 0.0)) # <--- Crucial
         metrics["llcd_active"] = float(llcd_active)
-        # Log the live Z-Score (even if not adapting) to see what detector is thinking
-        metrics["llcd_z_score"] = float(getattr(self, "llcd_z_score_log", 0.0))
         
         with torch.cuda.amp.autocast(self._use_amp):
             # ... (Context and Return) ...

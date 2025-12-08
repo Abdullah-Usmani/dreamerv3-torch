@@ -145,7 +145,7 @@ class Dreamer(nn.Module):
             self._wm.llcd_z_score_log = z_score
 
             if has_changed:
-                print(f"\n[LLCD] 🚨 LIVE DETECT! Score: {score:.2f} (Z: {z_score:.2f}) | Adapting...", flush=True)
+                print(f"[LLCD] 🚨 LIVE DETECT! Score: {score:.2f} (Z: {z_score:.2f}) | Adapting...")
                 
                 # 3. LATCH the Z-Score (Save it for the 50-step window)
                 # We clamp it to 0.0 min to avoid negative weights if something weird happens
@@ -190,6 +190,12 @@ class Dreamer(nn.Module):
         if self._config.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
             metrics.update({"expl_" + key: value for key, value in mets.items()})
+        # We iterate through metrics to find LLCD ones and write them raw
+        current_step = self._logger.step
+        for key, value in metrics.items():
+            if key.startswith("llcd_"):
+                # Write directly to TensorBoard, bypassing the 10k averaging window
+                self._logger.offline_scalar(key, value, current_step)
         for name, value in metrics.items():
             if not name in self._metrics.keys():
                 self._metrics[name] = [value]
@@ -440,13 +446,13 @@ def main(config):
             cycle_step = effective_step % cycle_length
             expected_idx = cycle_step // steps_per_task
 
-            print(f"[CRL] Step {agent._step} | Effective Task: {expected_idx}", flush=True)
+            print(f"[CRL] Step {agent._step} | Effective Task: {expected_idx}")
 
             desired_task_id = crl_tasks[expected_idx]
             
             # Only update if the task has CHANGED
             if current_task_idx != desired_task_id:
-                print(f"\n[CRL] Step {agent._step}: Switching dynamics to Task {desired_task_id}\n", flush=True)
+                print(f"[CRL] Step {agent._step}: Switching dynamics to Task {desired_task_id}")
                 
                 # Update all training environments
                 for env in train_envs:
