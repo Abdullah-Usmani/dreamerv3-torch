@@ -128,10 +128,8 @@ class WorldModel(nn.Module):
                     embed, data["action"], data["is_first"]
                 )
 
-                # --- [LLCD] NO DETECTION HERE ---
-                # We only READ the state set by dreamer.py
-                llcd_triggered = 0.0
-                # --------------------------------
+                # [LLCD] Detection happens in _policy (dreamer.py).
+                # Here we only apply the Adaptation Loss.
 
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
@@ -141,7 +139,7 @@ class WorldModel(nn.Module):
                     post, prior, kl_free, dyn_scale, rep_scale
                 )
                 
-                # ... (Predictions logic remains same) ...
+                # ... (Predictions and Base Losses) ...
                 preds = {}
                 for name, head in self.heads.items():
                     grad_head = name in self._config.grad_heads
@@ -162,13 +160,29 @@ class WorldModel(nn.Module):
                     for key, value in losses.items()
                 }
                 
-                # --- [LLCD] APPLY ADAPTATION (Loss Only) ---
+                # --- [LLCD] APPLY ADAPTATION (Technique 2: Z-Score Scaling) ---
                 total_loss = sum(scaled.values()) + kl_loss
+                llcd_active = 0.0
                 
                 if getattr(self._config, "llcd", False) and self.adaptation_timer > 0:
-                    # Use the score captured by _policy
-                    # Technique 2: Z-Score Scaling (or simple linear scaling)
-                    # We use the stored score to determine urgency
+                    # Retrieve the LATCHED Z-Score from the moment of detection
+                    # Default to 1.0 if missing
+                    # z_strength = getattr(self, "latched_z_score", 1.0)
+                    
+                    # # Scaling Logic:
+                    # # 1. Base Boost: 1.0 (Always double the dynamics importance)
+                    # # 2. Dynamic Boost: Z-Score * 2.0 (Higher Z = More Panic)
+                    # # 3. Safety Cap: 20.0
+                    
+                    # raw_weight = 1.0 + (z_strength * 2.0)
+                    # adapt_weight = min(raw_weight, 20.0)
+                    
+                    # # Apply
+                    # total_loss += adapt_weight * dyn_loss
+                    
+                    # self.adaptation_timer -= 1
+                    # llcd_active = 1.0
+
                     score = getattr(self, "current_adaptation_score", 1.0)
                     
                     # Weight Logic: 1.0 + Score (clamped at 20)
@@ -176,15 +190,18 @@ class WorldModel(nn.Module):
                     adapt_weight = min(raw_weight, 20.0)
                     # print(f"Adaptation Weight: {adapt_weight:.2f}", flush=True)
                     
-                    total_loss += adapt_weight * dyn_loss
+                    # total_loss += adapt_weight * dyn_loss
+                    constant_weight = 5.0
+                    total_loss += constant_weight * dyn_loss
                     self.adaptation_timer -= 1
-                    llcd_triggered = 1.0
+                    llcd_active = 1.0
+                    
                     
                     if self.adaptation_timer == 0:
-                         print(f"[LLCD] ✅ Adaptation Complete, Adaptation Weight: {adapt_weight:.2f}", flush=True)
+                         print(f"[LLCD] ✅ Adaptation Complete. (Adapt Weight: {adapt_weight:.2f} Actual Weight: {constant_weight:.2f} Total Loss: {total_loss})", flush=True)
                 
                 model_loss = total_loss
-                # -------------------------------------------
+                # -------------------------------
 
             metrics = self._model_opt(torch.mean(model_loss), self.parameters())
 
@@ -197,17 +214,13 @@ class WorldModel(nn.Module):
         metrics["rep_loss"] = to_np(rep_loss)
         metrics["kl"] = to_np(torch.mean(kl_value))
         
-        # --- [LLCD] LOGGING ---
-        # Log the score that triggered the current state
-        metrics["llcd_score"] = float(getattr(self, "llcd_score_log", 0.0))
-        metrics["llcd_active"] = float(llcd_triggered)
-        
-        # Optional: Log Run Length if using that detector version
-        if hasattr(self.change_detector, 'n'):
-             metrics["llcd_run_length"] = float(self.change_detector.n)
-        # ----------------------
+        # [LLCD] Logging
+        metrics["llcd_active"] = float(llcd_active)
+        # Log the live Z-Score (even if not adapting) to see what detector is thinking
+        metrics["llcd_z_score"] = float(getattr(self, "llcd_z_score_log", 0.0))
         
         with torch.cuda.amp.autocast(self._use_amp):
+            # ... (Context and Return) ...
             metrics["prior_ent"] = to_np(torch.mean(self.dynamics.get_dist(prior).entropy()))
             metrics["post_ent"] = to_np(torch.mean(self.dynamics.get_dist(post).entropy()))
             context = dict(
@@ -217,10 +230,9 @@ class WorldModel(nn.Module):
                 postent=self.dynamics.get_dist(post).entropy(),
             )
         post = {k: v.detach() for k, v in post.items()}
-        return post, context, metrics# this function is called during both rollout and training
+        return post, context, metrics
+    
     def preprocess(self, obs):
-        # --- FIX: Only call .copy() on numpy arrays (like images) ---
-        # Python bools (is_first, is_terminal) don't have .copy()
         obs = {
             k: torch.tensor(
                 v.copy() if isinstance(v, np.ndarray) else v, 

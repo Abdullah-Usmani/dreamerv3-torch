@@ -241,6 +241,35 @@ dmc_crl_walker_proprio:
   # Encoders (Vector Only)
   encoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
 
+dmc_crl_ball_proprio:
+  task: "dmc_crl_ball_in_cup_catch"
+
+  # Speed Settings
+  action_repeat: 4
+  envs: 1
+  # train_ratio: 32
+  video_pred_log: false
+
+  # Model Size (Simple physics, small model is fine)
+  # dyn_hidden: 200
+  # dyn_deter: 200
+  # units: 200
+
+  # CRL Schedule (400k Env Steps total)
+  steps: 400000
+  crl_tasks: [0, 1, 2, 3]
+  crl_steps_per_task: 25000 # 25k Agent Steps = 100k Env Steps
+
+  # Evaluation
+  eval_every: 10000
+  eval_episode_num: 10
+  log_every: 10000
+  prefill: 2500
+
+  # Encoders (Vector Only)
+  encoder: { mlp_keys: ".*", cnn_keys: "$^" }
+  decoder: { mlp_keys: ".*", cnn_keys: "$^" }
+
 crafter:
   task: crafter_reward
   step: 1e6

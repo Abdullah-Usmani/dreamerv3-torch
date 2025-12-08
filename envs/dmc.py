@@ -290,3 +290,109 @@ class ContinualCartPole:
     def action_space(self):
         spec = self._env.action_spec()
         return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
+    
+class ContinualBallInCup:
+    def __init__(self, task="catch", action_repeat=4, size=(64, 64), seed=0, vision=True):
+        # 1. Windows Rendering Fix
+        os.environ["MUJOCO_GL"] = "glfw"
+        
+        # 2. Load Base Environment
+        # Domain: ball_in_cup, Task: catch
+        self._env = suite.load("ball_in_cup", task, task_kwargs={"random": seed})
+        self._action_repeat = action_repeat
+        self._size = tuple(size)
+        self._vision = vision
+        self.camera_id = 0
+        
+        # 3. Continual Learning State
+        self.task_phase = 0
+        self._wind_force = 0.0
+        self._orig_gravity = self._env.physics.model.opt.gravity.copy()
+
+    def set_task(self, task_id):
+        """Defines 4 Physics Tasks for Ball-in-Cup."""
+        self.task_phase = task_id
+        
+        # Reset to Baseline
+        self._env.physics.model.opt.gravity[:] = self._orig_gravity
+        self._wind_force = 0.0
+
+        print(f"[ContinualBallInCup] Setting Task {task_id}...")
+
+        if task_id == 0:
+            print("   > Task 0: Standard Gravity")
+            
+        elif task_id == 1:
+            # Windy: Apply force to the 'ball' body
+            # A force of 0.1 to 0.2 is usually enough to disturb the light ball
+            self._wind_force = 0.15 
+            print(f"   > Task 1: Windy (Force {self._wind_force}N on Ball)")
+            
+        elif task_id == 2:
+            # Moon Gravity (-1.62)
+            # Ball falls slowly, timing is different
+            self._env.physics.model.opt.gravity[2] = -1.62
+            print("   > Task 2: Moon Gravity")
+            
+        elif task_id == 3:
+            # Jupiter Gravity (-25.0)
+            # Ball drops like a stone, requires fast reaction
+            self._env.physics.model.opt.gravity[2] = -25.0
+            print("   > Task 3: Jupiter Gravity")
+
+    def step(self, action):
+        action = np.clip(action, -1.0, 1.0)
+        reward = 0
+        
+        for _ in range(self._action_repeat):
+            # --- APPLY WIND TO BALL ---
+            if self._wind_force != 0.0:
+                # "ball" is the body name in ball_in_cup.xml
+                self._env.physics.named.data.xfrc_applied["ball", 0] = self._wind_force
+            
+            time_step = self._env.step(action)
+            reward += time_step.reward or 0
+            if time_step.last():
+                break
+        
+        obs = self._get_obs(time_step)
+        done = time_step.last()
+        info = {"discount": np.array(time_step.discount, np.float32)}
+        return obs, reward, done, info
+
+    def _get_obs(self, time_step):
+        # 1. Get Proprioceptive Data
+        obs = dict(time_step.observation)
+        obs = {key: [val] if np.isscalar(val) else val for key, val in obs.items()}
+        
+        # 2. Only Render if Vision is ON
+        if self._vision:
+            obs["image"] = self.render()
+            
+        obs["is_terminal"] = False if time_step.first() else time_step.discount == 0
+        obs["is_first"] = time_step.first()
+        return obs
+
+    def reset(self):
+        time_step = self._env.reset()
+        return self._get_obs(time_step)
+    
+    def render(self, mode="rgb_array"):
+        return self._env.physics.render(*self._size, camera_id=self.camera_id)
+
+    @property
+    def observation_space(self):
+        spaces = {}
+        for key, value in self._env.observation_spec().items():
+            shape = (1,) if len(value.shape) == 0 else value.shape
+            spaces[key] = gym.spaces.Box(-np.inf, np.inf, shape, dtype=np.float32)
+        
+        if self._vision:
+            spaces["image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
+            
+        return gym.spaces.Dict(spaces)
+
+    @property
+    def action_space(self):
+        spec = self._env.action_spec()
+        return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)

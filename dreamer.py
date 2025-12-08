@@ -124,22 +124,33 @@ class Dreamer(nn.Module):
         # 1. Forward the dynamics
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
         
-        # --- [LLCD] DETECT ON LIVE DATA ---
         if getattr(self._config, "llcd", False) and training:
             deter = latent["deter"]
+            
+            # 1. Update Detector & Get Score
             has_changed, score = self._wm.change_detector.update(deter)
             
-            # Helper for logging (Always update this to see live status)
-            self._wm.llcd_score_log = score 
+            # 2. Calculate Z-Score (Technique 2)
+            # We do this OUTSIDE the detector so we can see it even if it doesn't trigger
+            z_score = 0.0
+            detector = self._wm.change_detector
             
+            # Check if detector has enough history to calculate Z-score
+            if detector.n > 50: 
+                safe_std = max(detector.score_std, 0.001)
+                z_score = (score - detector.score_mean) / safe_std
+            
+            # Save for logging
+            self._wm.llcd_score_log = score
+            self._wm.llcd_z_score_log = z_score
+
             if has_changed:
-                print(f"\n[LLCD] 🚨 LIVE DETECT! Score: {score:.2f} | Adapting...", flush=True)
+                print(f"\n[LLCD] 🚨 LIVE DETECT! Score: {score:.2f} (Z: {z_score:.2f}) | Adapting...", flush=True)
                 
-                # --- FIX: LATCH THE SCORE HERE ---
-                # Only update the weight when a CHANGE is actually detected.
-                # This prevents subsequent non-change steps from overwriting it with 0.0
+                # 3. LATCH the Z-Score (Save it for the 50-step window)
+                # We clamp it to 0.0 min to avoid negative weights if something weird happens
+                self._wm.latched_z_score = max(0.0, z_score)
                 self._wm.current_adaptation_score = score 
-                # ---------------------------------
                 
                 self._wm.adaptation_timer = 50 
                 self._wm.change_detector.reset()
@@ -199,17 +210,21 @@ def make_dataset(episodes, config):
 def make_env(config, mode, id):
     # --- FIX: Custom parsing for Continual Learning Suite ---
     if config.task.startswith("dmc_crl"):
-        # Example: "dmc_crl_walker_walk" -> ['dmc', 'crl', 'walker', 'walk']
         parts = config.task.split("_")
         
-        domain = parts[2]      # "walker" or "cartpole"
-        task_name = parts[3]   # "walk" or "balance"
+        # Handling "ball_in_cup" which has underscores in the name
+        # Task string format: dmc_crl_ball_in_cup_catch
+        # parts: ['dmc', 'crl', 'ball', 'in', 'cup', 'catch']
+        
+        if "ball" in parts:
+            domain = "ball_in_cup"
+            task_name = parts[-1] # "catch"
+        else:
+            domain = parts[2]
+            task_name = parts[3]
         
         import envs.dmc as dmc
         
-        # Determine if we are doing Vision or Proprioception
-        # If 'image' is in the encoder keys, we enable rendering.
-        # If not (e.g., dmc_proprio config), we disable it for speed.
         use_vision = "image" in config.encoder.get("cnn_keys", [])
         
         if domain == "cartpole":
@@ -228,6 +243,7 @@ def make_env(config, mode, id):
                 seed=config.seed + id,
                 vision=use_vision
             )
+        # -----------------
         else:
             raise NotImplementedError(f"Unknown CRL domain: {domain}")
 
