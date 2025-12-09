@@ -49,7 +49,7 @@ python -m venv venv
 ```
 
 ```
-venvScriptsactivate
+venv\Scripts\activate
 ```
 
 ```
