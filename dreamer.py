@@ -24,13 +24,6 @@ from torch import distributions as torchd
 
 to_np = lambda x: x.detach().cpu().numpy()
 
-# run command: python dreamer.py --configs dmc_crl --task dmc_crl_cartpole_balance `
-# >>   --crl_steps_per_task 1000 `
-# >>   --eval_every 1000 `
-# >>   --log_every 1000 `
-# >>   --steps 10000 `
-# >>   --logdir ./logdir/dmc_crl_cartpole_test_v3  
-
 class MetricCaptureLogger:
     """Wraps the logger to capture specific metrics for CF calculations."""
     def __init__(self, logger, task_prefix, capture_dict):
@@ -121,7 +114,8 @@ class Dreamer(nn.Module):
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
         
-        # 1. Forward the dynamics
+        # LLCD Detection Logic
+        # Forward the latent dynamics
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
         
         if getattr(self._config, "llcd", False) and training:
@@ -208,26 +202,22 @@ def count_steps(folder):
 
 
 def make_dataset(episodes, config):
-    generator = tools.sample_episodes(episodes, config.batch_length)
+    generator = tools.sample_episodes(episodes, config.batch_length, seed=config.seed)
     dataset = tools.from_generator(generator, config.batch_size)
     return dataset
 
 
 def make_env(config, mode, id):
-    # --- FIX: Custom parsing for Continual Learning Suite ---
+
+    # --- DMC-based CRL Envs ---
     if config.task.startswith("dmc_crl"):
         parts = config.task.split("_")
         
-        # Handling "ball_in_cup" which has underscores in the name
         # Task string format: dmc_crl_ball_in_cup_catch
         # parts: ['dmc', 'crl', 'ball', 'in', 'cup', 'catch']
         
-        if "ball" in parts:
-            domain = "ball_in_cup"
-            task_name = parts[-1] # "catch"
-        else:
-            domain = parts[2]
-            task_name = parts[3]
+        domain = parts[2]
+        task_name = parts[3]
         
         import envs.dmc as dmc
         
@@ -249,7 +239,22 @@ def make_env(config, mode, id):
                 seed=config.seed + id,
                 vision=use_vision
             )
-        # -----------------
+        elif domain == "cup":
+            env = dmc.ContinualCupCatch(
+                task=task_name,
+                action_repeat=config.action_repeat,
+                size=config.size,
+                seed=config.seed + id,
+                vision=use_vision
+            )
+        elif domain == "pendulum":
+            env = dmc.ContinualPendulumSwingup(
+                task=task_name,
+                action_repeat=config.action_repeat,
+                size=config.size,
+                seed=config.seed + id,
+                vision=use_vision
+            )
         else:
             raise NotImplementedError(f"Unknown CRL domain: {domain}")
 

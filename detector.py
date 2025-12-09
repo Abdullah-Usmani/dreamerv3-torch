@@ -3,7 +3,7 @@ from scipy.stats import t
 
 class ChangeDetector:
     """
-    Option A: Adaptive 3-Sigma Anomaly Detector.
+    Adaptive 3-Sigma Anomaly Detector.
     Calculates the Negative Log Likelihood (Score) of the current state
     against the history of the current task.
     """

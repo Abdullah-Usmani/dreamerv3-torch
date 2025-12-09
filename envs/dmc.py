@@ -74,99 +74,6 @@ class DeepMindControl:
             raise ValueError("Only render mode 'rgb_array' is supported.")
         return self._env.physics.render(*self._size, camera_id=self._camera)
 
-class ContinualWalker:
-    def __init__(self, task="walk", action_repeat=2, size=(64, 64), seed=0, vision=True):
-        os.environ["MUJOCO_GL"] = "glfw"
-        self._env = suite.load("walker", task, task_kwargs={"random": seed})
-        self._action_repeat = action_repeat
-        self._size = tuple(size)
-        self._vision = vision # <--- This enables Proprioception speed
-        self.camera_id = 0
-        
-        # Continual Learning State
-        self.task_phase = 0
-        self._wind_force = 0.0
-        self._orig_gravity = self._env.physics.model.opt.gravity.copy()
-
-    def set_task(self, task_id):
-        """Switch Physics for Walker."""
-        self.task_phase = task_id
-        
-        # Reset to Baseline
-        self._env.physics.model.opt.gravity[:] = self._orig_gravity
-        self._wind_force = 0.0
-
-        print(f"[ContinualWalker] Setting Task {task_id}...")
-
-        if task_id == 0:
-            pass # Standard
-        elif task_id == 1:
-            # Walker is heavier/sturdier than CartPole, so we need more wind force
-            self._wind_force = 5.0 
-            print(f"   > Task 1: Windy (Force {self._wind_force}N)")
-        elif task_id == 2:
-            self._env.physics.model.opt.gravity[2] = -1.62
-            print("   > Task 2: Moon Gravity")
-        elif task_id == 3:
-            self._env.physics.model.opt.gravity[2] = -25.0
-            print("   > Task 3: Jupiter Gravity")
-
-    def step(self, action):
-        action = np.clip(action, -1.0, 1.0)
-        reward = 0
-        
-        for _ in range(self._action_repeat):
-            # --- APPLY WIND TO TORSO ---
-            if self._wind_force != 0.0:
-                self._env.physics.named.data.xfrc_applied["torso", 0] = self._wind_force
-            
-            time_step = self._env.step(action)
-            reward += time_step.reward or 0
-            if time_step.last():
-                break
-        
-        obs = self._get_obs(time_step)
-        done = time_step.last()
-        info = {"discount": np.array(time_step.discount, np.float32)}
-        return obs, reward, done, info
-
-    def _get_obs(self, time_step):
-        # 1. Get Proprioceptive Data (Vectors)
-        obs = dict(time_step.observation)
-        obs = {key: [val] if np.isscalar(val) else val for key, val in obs.items()}
-        
-        # 2. Only Render if Vision is ON
-        if self._vision:
-            obs["image"] = self.render()
-            
-        obs["is_terminal"] = False if time_step.first() else time_step.discount == 0
-        obs["is_first"] = time_step.first()
-        return obs
-
-    def reset(self):
-        time_step = self._env.reset()
-        return self._get_obs(time_step)
-    
-    def render(self, mode="rgb_array"):
-        return self._env.physics.render(*self._size, camera_id=self.camera_id)
-
-    @property
-    def observation_space(self):
-        spaces = {}
-        for key, value in self._env.observation_spec().items():
-            shape = (1,) if len(value.shape) == 0 else value.shape
-            spaces[key] = gym.spaces.Box(-np.inf, np.inf, shape, dtype=np.float32)
-        
-        # Only declare image space if vision is enabled
-        if self._vision:
-            spaces["image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
-            
-        return gym.spaces.Dict(spaces)
-
-    @property
-    def action_space(self):
-        spec = self._env.action_spec()
-        return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
 
 class ContinualCartPole:
     def __init__(self, task="balance", action_repeat=1, size=(64, 64), seed=0, vision=True):
@@ -175,10 +82,8 @@ class ContinualCartPole:
         
         self._env = suite.load("cartpole", task, task_kwargs={"random": seed})
         self._action_repeat = action_repeat
-        # --- FIX: Ensure size is a tuple so we can add (3,) to it later ---
         # self._size = size
         self._size = tuple(size) 
-        # ------------------------------------------------------------------
         self.camera_id = 0
         self._vision = vision
         
@@ -196,20 +101,20 @@ class ContinualCartPole:
         self._wind_force = 0.0
 
         if task_id == 0:
-            print(f"[Continual] Task {task_id}: Standard")
+            print(f"[ContinualCartpole] Task {task_id}: Standard")
         elif task_id == 1:
             self._wind_force = 1.0
-            print(f"[Continual] Task {task_id}: Windy")
+            print(f"[ContinualCartpole] Task {task_id}: Windy")
         elif task_id == 2:
             # Moon Gravity (approx 1/6 of Earth)
             self._env.physics.model.opt.gravity[2] = -1.62
-            print(f"[Continual] Task {task_id}: Moon Gravity")
+            print(f"[ContinualCartpole] Task {task_id}: Moon Gravity")
         elif task_id == 3:
             # High Gravity
             self._env.physics.model.opt.gravity[2] = -25.0
-            print(f"[Continual] Task {task_id}: Jupiter Gravity")
+            print(f"[ContinualCartpole] Task {task_id}: Jupiter Gravity")
 
-        # --- VERIFICATION BLOCK ---
+        # --- PHYSICS VERIFICATION BLOCK ---
         # Read values DIRECTLY from the physics engine to confirm they changed
         # current_gravity = self._env.physics.model.opt.gravity[2]
         # print(f"   > CONFIRMED GRAVITY (Z): {current_gravity}")
@@ -290,8 +195,100 @@ class ContinualCartPole:
     def action_space(self):
         spec = self._env.action_spec()
         return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
+
+class ContinualWalker:
+    def __init__(self, task="walk", action_repeat=2, size=(64, 64), seed=0, vision=True):
+        os.environ["MUJOCO_GL"] = "glfw"
+        self._env = suite.load("walker", task, task_kwargs={"random": seed})
+        self._action_repeat = action_repeat
+        self._size = tuple(size)
+        self._vision = vision
+        self.camera_id = 0
+        
+        # Continual Learning State
+        self.task_phase = 0
+        self._wind_force = 0.0
+        self._orig_gravity = self._env.physics.model.opt.gravity.copy()
+
+    def set_task(self, task_id):
+        """Switch Physics for Walker."""
+        self.task_phase = task_id
+        
+        # Reset to Baseline
+        self._env.physics.model.opt.gravity[:] = self._orig_gravity
+        self._wind_force = 0.0
+
+        if task_id == 0:
+            print(f"[ContinualWalker] Task {task_id}: Standard")        
+        elif task_id == 1:
+            # Walker is heavier/sturdier than CartPole, so we need more wind force
+            self._wind_force = 5.0 
+            print(f"[ContinualWalker] Task {task_id}: Windy")    
+        elif task_id == 2:
+            self._env.physics.model.opt.gravity[2] = -1.62
+            print(f"[ContinualWalker] Task {task_id}: Moon Gravity")      
+        elif task_id == 3:
+            self._env.physics.model.opt.gravity[2] = -25.0
+            print(f"[ContinualWalker] Task {task_id}: Jupiter Gravity")      
+
+    def step(self, action):
+        action = np.clip(action, -1.0, 1.0)
+        reward = 0
+        
+        for _ in range(self._action_repeat):
+            # --- APPLY WIND TO TORSO ---
+            if self._wind_force != 0.0:
+                self._env.physics.named.data.xfrc_applied["torso", 0] = self._wind_force
+            
+            time_step = self._env.step(action)
+            reward += time_step.reward or 0
+            if time_step.last():
+                break
+        
+        obs = self._get_obs(time_step)
+        done = time_step.last()
+        info = {"discount": np.array(time_step.discount, np.float32)}
+        return obs, reward, done, info
+
+    def _get_obs(self, time_step):
+        # 1. Get Proprioceptive Data (Vectors)
+        obs = dict(time_step.observation)
+        obs = {key: [val] if np.isscalar(val) else val for key, val in obs.items()}
+        
+        # 2. Only Render if Vision is ON
+        if self._vision:
+            obs["image"] = self.render()
+            
+        obs["is_terminal"] = False if time_step.first() else time_step.discount == 0
+        obs["is_first"] = time_step.first()
+        return obs
+
+    def reset(self):
+        time_step = self._env.reset()
+        return self._get_obs(time_step)
     
-class ContinualBallInCup:
+    def render(self, mode="rgb_array"):
+        return self._env.physics.render(*self._size, camera_id=self.camera_id)
+
+    @property
+    def observation_space(self):
+        spaces = {}
+        for key, value in self._env.observation_spec().items():
+            shape = (1,) if len(value.shape) == 0 else value.shape
+            spaces[key] = gym.spaces.Box(-np.inf, np.inf, shape, dtype=np.float32)
+        
+        # Only declare image space if vision is enabled
+        if self._vision:
+            spaces["image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
+            
+        return gym.spaces.Dict(spaces)
+
+    @property
+    def action_space(self):
+        spec = self._env.action_spec()
+        return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
+    
+class ContinualCupCatch:
     def __init__(self, task="catch", action_repeat=4, size=(64, 64), seed=0, vision=True):
         # 1. Windows Rendering Fix
         os.environ["MUJOCO_GL"] = "glfw"
@@ -317,28 +314,26 @@ class ContinualBallInCup:
         self._env.physics.model.opt.gravity[:] = self._orig_gravity
         self._wind_force = 0.0
 
-        print(f"[ContinualBallInCup] Setting Task {task_id}...")
-
         if task_id == 0:
-            print("   > Task 0: Standard Gravity")
+            print(f"[ContinualCupCatch] Task {task_id}: Standard")
             
         elif task_id == 1:
             # Windy: Apply force to the 'ball' body
             # A force of 0.1 to 0.2 is usually enough to disturb the light ball
             self._wind_force = 0.15 
-            print(f"   > Task 1: Windy (Force {self._wind_force}N on Ball)")
+            print(f"[ContinualCupCatch] Task {task_id}: Windy")
             
         elif task_id == 2:
             # Moon Gravity (-1.62)
             # Ball falls slowly, timing is different
             self._env.physics.model.opt.gravity[2] = -1.62
-            print("   > Task 2: Moon Gravity")
+            print(f"[ContinualCupCatch] Task {task_id}: Moon Gravity")
             
         elif task_id == 3:
             # Jupiter Gravity (-25.0)
             # Ball drops like a stone, requires fast reaction
             self._env.physics.model.opt.gravity[2] = -25.0
-            print("   > Task 3: Jupiter Gravity")
+            print(f"[Continual] Task {task_id}: Jupiter Gravity")
 
     def step(self, action):
         action = np.clip(action, -1.0, 1.0)
@@ -360,6 +355,111 @@ class ContinualBallInCup:
         info = {"discount": np.array(time_step.discount, np.float32)}
         return obs, reward, done, info
 
+    def _get_obs(self, time_step):
+        # 1. Get Proprioceptive Data
+        obs = dict(time_step.observation)
+        obs = {key: [val] if np.isscalar(val) else val for key, val in obs.items()}
+        
+        # 2. Only Render if Vision is ON
+        if self._vision:
+            obs["image"] = self.render()
+            
+        obs["is_terminal"] = False if time_step.first() else time_step.discount == 0
+        obs["is_first"] = time_step.first()
+        return obs
+
+    def reset(self):
+        time_step = self._env.reset()
+        return self._get_obs(time_step)
+    
+    def render(self, mode="rgb_array"):
+        return self._env.physics.render(*self._size, camera_id=self.camera_id)
+
+    @property
+    def observation_space(self):
+        spaces = {}
+        for key, value in self._env.observation_spec().items():
+            shape = (1,) if len(value.shape) == 0 else value.shape
+            spaces[key] = gym.spaces.Box(-np.inf, np.inf, shape, dtype=np.float32)
+        
+        if self._vision:
+            spaces["image"] = gym.spaces.Box(0, 255, self._size + (3,), dtype=np.uint8)
+            
+        return gym.spaces.Dict(spaces)
+
+    @property
+    def action_space(self):
+        spec = self._env.action_spec()
+        return gym.spaces.Box(spec.minimum, spec.maximum, dtype=np.float32)
+
+class ContinualPendulumSwingup:
+    def __init__(self, task="swingup", action_repeat=2, size=(64, 64), seed=0, vision=False):
+        # 1. Windows Rendering Fix
+        os.environ["MUJOCO_GL"] = "glfw"
+        
+        # 2. Load Base Environment
+        # Domain: pendulum, Task: swingup
+        self._env = suite.load("pendulum", task, task_kwargs={"random": seed})
+        self._action_repeat = action_repeat
+        self._size = tuple(size)
+        self._vision = vision
+        self.camera_id = 0
+        
+        # 3. Continual Learning State
+        self.task_phase = 0
+        self._wind_force = 0.0
+        self._orig_gravity = self._env.physics.model.opt.gravity.copy()
+
+    def set_task(self, task_id):
+        """Defines 4 Physics Tasks for Pendulum Swingup."""
+        self.task_phase = task_id
+        
+        # Reset to Baseline
+        self._env.physics.model.opt.gravity[:] = self._orig_gravity
+        self._wind_force = 0.0
+
+        if task_id == 0:
+            print(f"[ContinualPendulum] Task {task_id}: Standard")
+            
+        elif task_id == 1:
+            # Windy: Apply constant force to the pendulum pole
+            # This pushes the pendulum to the side, forcing the agent to fight it
+            self._wind_force = 1.0 
+            print(f"[ContinualPendulum] Task {task_id}: Windy (Force=1.0)")
+            
+        elif task_id == 2:
+            # Moon Gravity (-1.62)
+            # Pendulum floats slowly, making momentum generation difficult
+            self._env.physics.model.opt.gravity[2] = -1.62
+            print(f"[ContinualPendulum] Task {task_id}: Moon Gravity")
+            
+        elif task_id == 3:
+            # Jupiter Gravity (-25.0)
+            # Pendulum is extremely heavy, requires max torque to lift
+            self._env.physics.model.opt.gravity[2] = -25.0
+            print(f"[ContinualPendulum] Task {task_id}: Jupiter Gravity")
+
+    def step(self, action):
+        action = np.clip(action, -1.0, 1.0)
+        reward = 0
+        
+        for _ in range(self._action_repeat):
+            # --- APPLY WIND TO PENDULUM POLE ---
+            if self._wind_force != 0.0:
+                # "pole" is the body name in pendulum.xml
+                # Index 0 applies force in the X-axis (Horizontal push)
+                self._env.physics.named.data.xfrc_applied["pole", 0] = self._wind_force
+            
+            time_step = self._env.step(action)
+            reward += time_step.reward or 0
+            if time_step.last():
+                break
+        
+        obs = self._get_obs(time_step)
+        done = time_step.last()
+        info = {"discount": np.array(time_step.discount, np.float32)}
+        return obs, reward, done, info
+    
     def _get_obs(self, time_step):
         # 1. Get Proprioceptive Data
         obs = dict(time_step.observation)

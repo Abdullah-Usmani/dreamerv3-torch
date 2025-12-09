@@ -205,9 +205,7 @@ def simulate(
                 save_episodes(directory, {envs[i].id: cache[envs[i].id]})
                 length = len(cache[envs[i].id]["reward"]) - 1
                 score = float(np.array(cache[envs[i].id]["reward"]).sum())
-                # --- FIX: Handle missing images for Proprioception runs ---
                 video = cache[envs[i].id].get("image") 
-                # ---------------------------------------------------------
                 # record logs given from environments
                 for key in list(cache[envs[i].id].keys()):
                     if "log_" in key:

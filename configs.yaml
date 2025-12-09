@@ -29,7 +29,7 @@ defaults:
   reward_EMA: True
 
   # Model
-  llcd: False # <--- ADD THIS LINE (Default is OFF/Original)
+  llcd: False # New LLCD Flag
   dyn_hidden: 512
   dyn_deter: 512
   dyn_stoch: 32
@@ -158,117 +158,46 @@ dmc_vision:
   encoder: { mlp_keys: "$^", cnn_keys: "image" }
   decoder: { mlp_keys: "$^", cnn_keys: "image" }
 
-dmc_crl:
-  crl_tasks: [0, 1, 2, 3] # 0:Std, 1:Wind, 2:Moon, 3:Jupiter
-  crl_steps_per_task: 100000 # Switch every 100k steps
-  # task: "dmc_crl_cartpole_balance"
-  # env: "dmc_crl"
-  # --- CRL SPECIFIC ---
-  # Standard DreamerV3 params
-  steps: 5e5
-  action_repeat: 2
-  # time_limit: 1000
-  # --------------------
-  eval_every: 10000
-  log_every: 10000
-  prefill: 2500
-  train_ratio: 512
-  video_pred_log: true
-  encoder: { mlp_keys: "$^", cnn_keys: "image" }
-  decoder: { mlp_keys: "$^", cnn_keys: "image" }
-
 dmc_crl_fast:
   # CRL Specifics
   crl_tasks: [0, 1, 2, 3]
-  crl_steps_per_task: 25000 # 25k Agent Steps = 100k Env Steps
+  crl_steps_per_task: 25000 # 25k Agent Steps = 100k Env Steps - if action_repeat=4
 
-  # Base settings from dmc_proprio (No Images)
-  steps: 4e5 # Total Env Steps (100k per task)
-  action_repeat: 4 # 2x Speedup (Standard is 2)
+  # Training
+  steps: 4e5
+  action_repeat: 4
   envs: 1
-  # envs: 4 # 4 Parallel Envs
   train_ratio: 512
   video_pred_log: true # Disable video logging
 
   # Evaluation
   eval_every: 10000 # Check progress every 10k steps
-  eval_episode_num: 10 # Faster eval (5 eps instead of 10)
+  eval_episode_num: 10 # Faster eval
   log_every: 10000
   prefill: 2500
 
-  # Model Size Reduction (2.5x Speedup)
-  # dyn_hidden: 200 # Down from 512
-  # dyn_deter: 200 # Down from 512
-  # units: 200 # Down from 512
-
-  # Proprioception Encoders (No CNN)
   encoder: { mlp_keys: "$^", cnn_keys: "image" }
   decoder: { mlp_keys: "$^", cnn_keys: "image" }
-  # encoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
-  # decoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
 
-dmc_crl_walker_proprio:
-  # Task Identity
-  task: "dmc_crl_walker_walk"
-
-  # Walker Specifics (Needs faster control frequency)
-  action_repeat: 4
-
-  # Speed Optimizations (Proprioception)
-  envs: 1
-  train_ratio: 32
-  video_pred_log: false
-
-  # Model Size (Walker is harder than CartPole, so slightly larger model)
-  dyn_hidden: 200
-  dyn_deter: 200
-  units: 200
-
-  # CRL Schedule (Adjusted for Repeat 2)
-  # 800k Env Steps / 2 = 400k Agent Steps
-  # 400k / 4 tasks = 100k Agent Steps per Task
-  steps: 1600000
+dmc_crl_fast_proprio:
+  # CRL Specifics
   crl_tasks: [0, 1, 2, 3]
-  # crl_steps_per_task: 200000
-  crl_steps_per_task: 25000
+  crl_steps_per_task: 150000 # 150k Agent Steps = 600k Env Steps - if action_repeat=4
 
-  # Evaluation
-  eval_every: 25000 # Every 50k Env Steps
-  eval_episode_num: 5
-  log_every: 10000
-  prefill: 2500
-
-  # Encoders (Vector Only)
-  encoder: { mlp_keys: ".*", cnn_keys: "$^", mlp_units: 200, mlp_layers: 2 }
-
-dmc_crl_ball_proprio:
-  task: "dmc_crl_ball_in_cup_catch"
-
-  # Speed Settings
+  # Training
+  steps: 2400000
   action_repeat: 4
   envs: 1
-  # train_ratio: 32
-  video_pred_log: false
-
-  # Model Size (Simple physics, small model is fine)
-  # dyn_hidden: 200
-  # dyn_deter: 200
-  # units: 200
-
-  # CRL Schedule (400k Env Steps total)
-  steps: 400000
-  crl_tasks: [0, 1, 2, 3]
-  crl_steps_per_task: 25000 # 25k Agent Steps = 100k Env Steps
+  train_ratio: 64
+  video_pred_log: false # Disable video logging
 
   # Evaluation
-  eval_every: 10000
+  eval_every: 40000 # Check progress every 40k steps
   eval_episode_num: 10
-  log_every: 10000
+  log_every: 40000
   prefill: 2500
 
-  # Encoders (Vector Only)
   encoder: { mlp_keys: ".*", cnn_keys: "$^" }
-  decoder: { mlp_keys: ".*", cnn_keys: "$^" }
 
 crafter:
   task: crafter_reward

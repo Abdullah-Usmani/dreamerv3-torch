@@ -160,32 +160,32 @@ class WorldModel(nn.Module):
                     for key, value in losses.items()
                 }
                 
-                # --- [LLCD] APPLY ADAPTATION (Technique 2: Z-Score Scaling) ---
+                # --- [LLCD] APPLY ADAPTATION ---
                 total_loss = sum(scaled.values()) + kl_loss
                 llcd_active = 0.0
                 
                 if getattr(self._config, "llcd", False) and self.adaptation_timer > 0:
+                    
+
+                    # (Technique 1: Constant Value Scaling) 
+                    # raw_weight = 5.0
+
+
+                    # (Technique 2: Z-Score Scaling) 
                     # Retrieve the LATCHED Z-Score from the moment of detection
-                    # Default to 1.0 if missing
-                    z_strength = getattr(self, "latched_z_score", 1.0)
+                    # 1. Base Boost: 1.0 (Always double the dynamics importance)
+                    # 2. Dynamic Boost: Z-Score * 2.0 (Higher Z = More Panic)
+                    # 3. Safety Cap: 20.0
                     
-                    # # Scaling Logic:
-                    # # 1. Base Boost: 1.0 (Always double the dynamics importance)
-                    # # 2. Dynamic Boost: Z-Score * 2.0 (Higher Z = More Panic)
-                    # # 3. Safety Cap: 20.0
-                    
-                    # raw_weight = 1.0 + (z_strength * 2.0)
+                    z_strength = getattr(self, "latched_z_score", 1.0) # Default to 1.0 if missing
                     raw_weight = z_strength
-                    adapt_weight = min(raw_weight, 20.0)
-                    
                     score = getattr(self, "current_adaptation_score", 1.0)
                     
+                    # (Technique 3: NLL-Score Scaling) 
                     # Weight Logic: 1.0 + Score (clamped at 20)
                     # raw_weight = 1.0 + max(0.0, score)
-                    # adapt_weight = min(raw_weight, 20.0)
-                    
-                    # constant_weight = 5.0
-                    # total_loss += constant_weight * dyn_loss
+
+                    adapt_weight = min(raw_weight, 20.0)
 
                     total_loss += adapt_weight * dyn_loss
                     self.adaptation_timer -= 1
@@ -193,7 +193,7 @@ class WorldModel(nn.Module):
                     
                     
                     if self.adaptation_timer == 0:
-                         print(f"[LLCD] ✅ Adaptation Complete. (Adapt Weight: {adapt_weight:.2f} Score Weight: {score:.2f})")
+                         print(f"[LLCD] ✅ Adaptation Complete. (Adapt Weight: {adapt_weight:.2f} NLL-Score: {score:.2f})")
                 
                 model_loss = total_loss
                 # -------------------------------
@@ -235,9 +235,7 @@ class WorldModel(nn.Module):
                 dtype=torch.float32
             )
             for k, v in obs.items()
-        }
-        # ------------------------------------------------------------
-        
+        }        
         if "image" in obs:
             obs["image"] = obs["image"] / 255.0
         if "discount" in obs:
