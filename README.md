@@ -151,12 +151,10 @@ This script generates tables and plots for **Catastrophic Forgetting**, **Conver
 1. Ensure your logs are in logdir/.
 2. Open analyze_results.py and update the experiments dictionary to point to your specific log folders.
 3. Run:
-4. Bash
-
+Bash
+```
 python analyze_results.py
-
-5.
-6.
+```
 
 **Outputs:**
 
