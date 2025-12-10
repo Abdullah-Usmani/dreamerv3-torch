@@ -1,28 +1,28 @@
 # Continual Learning with DreamerV3 + LLCD
 
-This repository is a fork of the [DreamerV3-Torch](https://github.com/NM512/dreamerv3-torch) repository (original README.md text is further below), modified to support \***\*Continual Reinforcement Learning (CRL)\*\*** scenarios. It integrates the \***\*Learning Latent and Changing Dynamics (LLCD)\*\*** algorithm to detect and adapt to sudden changes in environment physics (e.g., gravity, friction, wind) without catastrophic forgetting.
+This repository is a fork of the [DreamerV3-Torch](https://github.com/NM512/dreamerv3-torch) repository (original README.md text is further below), modified to support **Continual Reinforcement Learning (CRL)** scenarios. It integrates the \***\*Learning Latent and Changing Dynamics (LLCD)\*\*** algorithm to detect and adapt to sudden changes in environment physics (e.g., gravity, friction, wind) without catastrophic forgetting.
 
-\***\*Project Links:\*\*** [GitHub](https://github.com/Abdullah-Usmani/dreamerv3-torch/) | [GitHub (Old)](https://github.com/Abdullah-Usmani/ARS-CW2526/)
+**Project Links:** [GitHub](https://github.com/Abdullah-Usmani/dreamerv3-torch/) | [GitHub (Old)](https://github.com/Abdullah-Usmani/ARS-CW2526/)
 
 ---
 
 ## ⚡ Key Additions
 
-1. \***\*Continual Reinforcement Learning (CRL) Loop\*\***:
+1. **Continual Reinforcement Learning (CRL) Loop**:
 
    - Automated task switching based on step counts.
 
    - Environment wrappers that modify physics parameters on-the-fly.
 
-2. \***\*LLCD Integration\*\***:
+2. **LLCD Integration**:
 
-   - \***\*Anomaly Detection\*\***: Adaptive 3-Sigma detector using Negative Log Likelihood (NLL) of latent dynamics.
+   - **Anomaly Detection**: Adaptive 3-Sigma detector using Negative Log Likelihood (NLL) of latent dynamics.
 
-   - \***\*Adaptation Module\*\***: A secondary "context encoder" that learns a latent variable ($z$) to capture physics parameters.
+   - **Adaptation Module**: A secondary "context encoder" that learns a latent variable ($z$) to capture physics parameters.
 
-   - \***\*Gated Adaptation\*\***: Mechanism to switch adaptation on/off to prevent overfitting to noise.
+   - **Gated Adaptation**: Mechanism to switch adaptation on/off to prevent overfitting to noise.
 
-3. \***\*Reservoir Replay Buffer\*\***:
+3. **Reservoir Replay Buffer**:
 
    - Replaces standard FIFO memory with Reservoir Sampling to retain long-term experiences for CRL.
 
@@ -30,41 +30,24 @@ This repository is a fork of the [DreamerV3-Torch](https://github.com/NM512/drea
 
 ## 🛠️ Installation & Setup
 
-This codebase requires \***\*Python 3.11\*\***.
+This codebase requires **Python 3.11**.
 
 ### 1. Create Virtual Environment
 
-Bash
-
 ```
 # Create venv
-```
-
-```
 python -m venv venv
-```
 
-```
 # Activate (Windows)
-```
-
-```
 venv\Scripts\activate
-```
 
-```
 # Activate (Linux/Mac)
-```
-
-```
 source venv/bin/activate
 ```
 
 ### **2. Install Dependencies**
 
 Ensure you have the modified requirements.txt present.
-
-Bash
 
 ```
 pip install -r requirements.txt
@@ -119,39 +102,75 @@ set MUJOCO_GL=glfw
 
 To run a standard Continual Learning experiment (e.g., CartPole):
 
-Bash
-
-python dreamer.py --configs dmc_crl_cartpole --task dmc_cartpole_balance --llcd True --seed 0
+```
+python dreamer.py --configs dmc_crl_fast --task dmc_crl_cartpole_balance --llcd True --logdir ./logdir/cartpole_crl_test
+```
 
 ### **Important Flags**
 
 - --llcd True/False: Enables or disables the LLCD adaptation module.
-- --configs: Loads a specific block from configs.yaml.
+- --configs: Loads a specific configuration from configs.yaml.
 - --seed: Random seed (Crucial for reproducibility).
 
 ### **Critical Hyperparameters (in configs.yaml)**
 
 | Parameter              | Value (Example)         | Description                                                                                    |
 | :--------------------- | :---------------------- | :--------------------------------------------------------------------------------------------- |
-| **train_ratio**        | 4 (or 512 for CartPole) | **Crucial:** How many env steps per gradient update. Use 4 for complex physics (Cup/Pendulum). |
-| **action_repeat**      | 2 or 4                  | How many simulation steps per agent decision.                                                  |
-| **prefill**            | 2500 or 10000           | Random steps collected before training starts (Warmup).                                        |
+| **train_ratio**        | 512                     | **Crucial:** How many env steps per gradient update. Use 4 for complex physics (Cup/Pendulum). |
+| **action_repeat**      | 4                       | How many simulation steps per agent decision.                                                  |
+| **prefill**            | 2500                    | Random steps collected before training starts (Warmup).                                        |
 | **crl_steps_per_task** | 25000                   | Number of _agent steps_ before switching physics.                                              |
+
+### **Reproducing Paper Results**
+
+To replicate the results from the paper, run the following commands:
+
+```
+# 1. CartPole_Balance (Vision-Based)
+# Baseline Seeds
+python dreamer.py --configs dmc_crl_fast --task dmc_crl_cartpole_balance --llcd False --seed 0 --logdir ./logdir/cartpole_crl_baseline0
+python dreamer.py --configs dmc_crl_fast --task dmc_crl_cartpole_balance --llcd False --seed 1 --logdir ./logdir/cartpole_crl_baseline1
+python dreamer.py --configs dmc_crl_fast --task dmc_crl_cartpole_balance --llcd False --seed 2 --logdir ./logdir/cartpole_crl_baseline2
+
+# Hybrid Seeds
+python dreamer.py --configs dmc_crl_fast --task dmc_crl_cartpole_balance --llcd True --seed 0 --logdir ./logdir/cartpole_crl_hybrid0
+python dreamer.py --configs dmc_crl_fast --task dmc_crl_cartpole_balance --llcd True --seed 1 --logdir ./logdir/cartpole_crl_hybrid1
+python dreamer.py --configs dmc_crl_fast --task dmc_crl_cartpole_balance --llcd True --seed 2 --logdir ./logdir/cartpole_crl_hybrid2
+
+# 2. Walker_Walk (Proprio-Based)
+# Baseline Seeds
+python dreamer.py --configs dmc_crl_fast_proprio --task dmc_crl_walker_walk --llcd False --seed 0 --logdir ./logdir/walker_crl_baseline0
+python dreamer.py --configs dmc_crl_fast_proprio --task dmc_crl_walker_walk --llcd False --seed 1 --logdir ./logdir/walker_crl_baseline1
+python dreamer.py --configs dmc_crl_fast_proprio --task dmc_crl_walker_walk --llcd False --seed 2 --logdir ./logdir/walker_crl_baseline2
+
+# Hybrid Seeds
+python dreamer.py --configs dmc_crl_fast_proprio --task dmc_crl_walker_walk --llcd True --seed 0 --logdir ./logdir/walker_crl_hybrid0
+python dreamer.py --configs dmc_crl_fast_proprio --task dmc_crl_walker_walk --llcd True --seed 1 --logdir ./logdir/walker_crl_hybrid1
+python dreamer.py --configs dmc_crl_fast_proprio --task dmc_crl_walker_walk --llcd True --seed 2 --logdir ./logdir/walker_crl_hybrid2
+```
 
 ---
 
 ## **📊 Analysis & Results**
 
+### **tensorboard (original)**
+
+Results can be monitored live using the original tensorboard method:
+
+```
+tensorboard --logdir ./logdir
+```
+
 ### **analyze_results.py**
 
-This script generates tables and plots for **Catastrophic Forgetting**, **Convergence Speed**, and **Model Loss**.
+This script generates tables and plots for **Returns**, **Catastrophic Forgetting**, **Convergence Speed**, and **Model Loss**.
 
 **Usage:**
 
 1. Ensure your logs are in logdir/.
 2. Open analyze_results.py and update the experiments dictionary to point to your specific log folders.
 3. Run:
-Bash
+
 ```
 python analyze_results.py
 ```
@@ -165,13 +184,6 @@ python analyze_results.py
 
 - **test_detector.py**: Unit test to verify the 3-Sigma logic on dummy data.
 - **verify_physics.py**: Runs the environments without an agent to visually/numerically confirm that gravity/mass actually changes when set_task() is called.
-
----
-
-## **🐛 Troubleshooting**
-
-- **Video Logging Crash:** If you see KeyError: 'image', it means the logger is trying to make a video for a vector-only environment. Set video_pred_log: false in configs.yaml.
-- **0 Rewards in Proprioception:** Check train_ratio. If set to 32 or higher, the agent learns too slowly for dynamic tasks like Ball-in-Cup. Lower it to 4.
 
 ---
 
