@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import math
+import numpy as np
 
 # --- CONFIGURATION ---
 experiments = {
@@ -13,10 +14,17 @@ experiments = {
     "Cartpole Base 2": "./logdir/cartpole_fast_base_2", 
     
     # Hybrid Seeds
-    "Cartpole Test": "./logdir/cartpole_llcd_diffadap_test2", 
-    "Cartpole Mock": "./logdir/cartpole_llcd_diffadap_test4", 
+    "Cartpole LLCD 0": "./logdir/cartpole_llcd_diffadap_test2", 
+    "Cartpole LLCD 1": "./logdir/cartpole_llcd_diffadap_test1", 
+    "Cartpole LLCD 2": "./logdir/cartpole_llcd_diffadap_test4", 
 
-    "Cartpole Other": "./logdir/cartpole_llcd_diffadap_test11", 
+    # # Baseline Seeds
+    # "Walker Base 0": "./logdir/walker_tr64_0", 
+    # "Walker Base 1": "./logdir/walker_tr64_1", 
+    
+    # # Hybrid Seeds
+    # "Walker LLCD 0": "./logdir/walker_llcd_tr64_0", 
+    # "Walker LLCD 1": "./logdir/walker_llcd_tr64_1", 
 }
 
 # The metrics you want in the grid
@@ -33,11 +41,13 @@ metrics_to_plot = [
 ]
 
 # Binning size: Round steps to nearest X to force alignment
-STEP_BIN_SIZE = 10000 
+STEP_BIN_SIZE = 10000
+# STEP_BIN_SIZE = 60000 # for Walker
 
 action_repeat = 4
 prefill_step_size = 2500 * action_repeat
 task_switches = [100000 + prefill_step_size, 200000 + prefill_step_size, 300000 + prefill_step_size, 400000 + prefill_step_size]
+# task_switches = [600000 + prefill_step_size, 1200000 + prefill_step_size, 1800000 + prefill_step_size, 2400000 + prefill_step_size] # for Walker
 
 # Convergence Threshold (e.g., 0.90 means "steps to reach 90% of max score")
 CONVERGENCE_THRESHOLD = 0.90
@@ -51,13 +61,13 @@ def load_data(experiments, metrics):
         if "Base" in label:
             group = "Continual-DreamerV3"
         elif "LLCD" in label:
-            group = "Hybrid (LLCD + Memory)"
+            group = "LLCD-Dreamer"
         elif "Test" in label:
             group = "LLCD Hybrid (Constant)"
         elif "Mock" in label:
-            group = "LLCD Hybrid (Z-Score)"
+            group = "LLCD Hybrid (NLL-Score)"
         else:
-            group = "LLCD Hybrid (Score)"
+            group = "LLCD Hybrid (Z-Score)"
 
         file_path = pathlib.Path(path) / "metrics.jsonl"
         if not file_path.exists():
@@ -79,7 +89,7 @@ def load_data(experiments, metrics):
                         if metric in entry:
                             all_data.append({
                                 "Step": aligned_step, 
-                                "Value": entry[metric],
+                                "Return": entry[metric],
                                 "Metric": metric,
                                 "Group": group,
                                 "Run": label
@@ -88,66 +98,46 @@ def load_data(experiments, metrics):
 
     return pd.DataFrame(all_data)
 
-def calculate_convergence(df, metric_name, group, start_step, end_step):
-    """
-    Finds the first step where performance >= 90% of the Max Performance within the task window.
-    Returns: (Steps Taken to Converge, Max Score)
-    """
-    # Filter for specific group and metric within the task time window
-    subset = df[
-        (df["Metric"] == metric_name) & 
-        (df["Group"] == group) & 
-        (df["Step"] >= start_step) & 
-        (df["Step"] <= end_step)
-    ]
-    
-    if subset.empty:
-        return "N/A", 0.0
-
-    # We smooth the data to avoid spikes triggering "fake" convergence
-    # Group by step to handle multiple seeds, then take mean
-    mean_trajectory = subset.groupby("Step")["Value"].mean()
-    
-    if mean_trajectory.empty:
-        return "N/A", 0.0
-
-    max_score = mean_trajectory.max()
-    target_score = max_score * CONVERGENCE_THRESHOLD
-    
-    # Find first step where value >= target
-    # We subtract start_step to get "Steps SINCE task start"
-    converged_steps = mean_trajectory[mean_trajectory >= target_score].index
-    
-    if len(converged_steps) > 0:
-        first_success_step = converged_steps[0]
-        speed = first_success_step - start_step
-        # Ensure speed isn't negative due to binning alignment
-        return max(0, speed), max_score
-    else:
-        return "Not Reached", max_score
-
+def get_stats_string(values):
+    """Helper to return 'Mean ± Std' string from a list of values."""
+    if len(values) == 0:
+        return "N/A"
+    mean_val = np.mean(values)
+    std_val = np.std(values) if len(values) > 1 else 0.0
+    return f"{mean_val:.2f} ± {std_val:.2f}"
 
 def print_text_analysis(df):
-    print("\n" + "="*60)
-    print("             NUMERICAL ANALYSIS REPORT             ")
-    print("="*60)
+    print("\n" + "="*80)
+    print(f"{'NUMERICAL ANALYSIS REPORT (Mean ± Std)':^80}")
+    print("="*80)
     
     groups = df["Group"].unique()
     
     # --- 1. Model Loss Analysis ---
-    print(f"\n[ Model Loss Summary ]")
+    print(f"\n[ Model Loss Summary (Final 50k steps) ]")
     loss_data = df[df["Metric"] == "model_loss"]
+    
     if not loss_data.empty:
         for group in groups:
-            g_data = loss_data[loss_data["Group"] == group]
-            max_step = g_data["Step"].max()
-            final_loss = g_data[g_data["Step"] >= max_step - 50000]["Value"].mean()
-            print(f"  > {group}: Final Avg Loss ~ {final_loss:.4f}")
+            # Get all runs (seeds) for this group
+            group_runs = loss_data[loss_data["Group"] == group]["Run"].unique()
+            final_losses = []
+            
+            for run in group_runs:
+                # Isolate data for THIS seed
+                run_data = loss_data[loss_data["Run"] == run]
+                max_step = run_data["Step"].max()
+                # Average loss for this specific seed over its last 50k steps
+                final_val = run_data[run_data["Step"] >= max_step - 50000]["Return"].mean()
+                if not pd.isna(final_val):
+                    final_losses.append(final_val)
+            
+            print(f"  > {group:<25}: {get_stats_string(final_losses)}")
     else:
         print("  (No model_loss data found)")
 
-    # --- 2. Convergence Analysis ---
-    print(f"\n[ Convergence Speed (Steps to reach {int(CONVERGENCE_THRESHOLD*100)}% of Max) ]")
+    # --- 2. Return Analysis (UPDATED: Max Return) ---
+    print(f"\n[ Return Analysis (Max Return Achieved in Task Window) ]")
     
     task_windows = [
         ("Task 0", "task_0_eval_return", 0, task_switches[0]),
@@ -155,19 +145,89 @@ def print_text_analysis(df):
         ("Task 2", "task_2_eval_return", task_switches[1], task_switches[2]),
         ("Task 3", "task_3_eval_return", task_switches[2], task_switches[3]),
     ]
+
+    for task_name, metric, start, end in task_windows:
+        print(f"\n  -- {task_name} --")
+        for group in groups:
+            group_runs = df[(df["Group"] == group) & (df["Metric"] == metric)]["Run"].unique()
+            run_maxs = []
+
+            for run in group_runs:
+                subset = df[
+                    (df["Metric"] == metric) & 
+                    (df["Run"] == run) & 
+                    (df["Step"] >= start) & 
+                    (df["Step"] <= end)
+                ]
+                if not subset.empty:
+                    # CHANGED: Use .max() instead of .mean()
+                    # We want to know if the agent EVER solved the task
+                    run_maxs.append(subset["Return"].max())
+
+            print(f"    {group:<25}: {get_stats_string(run_maxs)}")
+
+    # --- 3. Average Reward Analysis ---
+    print(f"\n[ Average Reward Across All Tasks (Final Snapshot) ]")
+    avg_reward_data = df[df["Metric"] == "crl_avg_reward_all_tasks"]
+    if not avg_reward_data.empty:
+        for group in groups:
+            group_runs = avg_reward_data[avg_reward_data["Group"] == group]["Run"].unique()
+            final_vals = []
+            
+            for run in group_runs:
+                g_data = avg_reward_data[avg_reward_data["Run"] == run]
+                if not g_data.empty:
+                    latest_step = g_data["Step"].max()
+                    val = g_data[g_data["Step"] == latest_step]["Return"].mean()
+                    final_vals.append(val)
+            
+            print(f"  > {group:<25}: {get_stats_string(final_vals)}")
+    else:
+        print("  (No crl_avg_reward_all_tasks data found)")
+
+    # --- 4. Convergence Analysis ---
+    print(f"\n[ Convergence Speed (Steps to reach {int(CONVERGENCE_THRESHOLD*100)}% of Max) ]")
     
     for task_name, metric, start, end in task_windows:
         print(f"\n  -- {task_name} --")
         for group in groups:
-            speed, max_score = calculate_convergence(df, metric, group, start, end)
-            if speed == "N/A":
-                print(f"    {group:<25}: No Data")
-            elif speed == "Not Reached":
-                print(f"    {group:<25}: Did not converge (Max: {max_score:.1f})")
-            else:
-                print(f"    {group:<25}: {speed} steps (Max: {max_score:.1f})")
+            group_runs = df[(df["Group"] == group) & (df["Metric"] == metric)]["Run"].unique()
+            convergence_speeds = []
+            max_scores = []
+            
+            for run in group_runs:
+                subset = df[
+                    (df["Metric"] == metric) & 
+                    (df["Run"] == run) & 
+                    (df["Step"] >= start) & 
+                    (df["Step"] <= end)
+                ]
+                
+                if subset.empty: continue
+                
+                trajectory = subset.groupby("Step")["Return"].mean()
+                
+                max_score = trajectory.max()
+                max_scores.append(max_score)
+                
+                target_score = max_score * CONVERGENCE_THRESHOLD
+                converged_indices = trajectory[trajectory >= target_score].index
+                
+                if len(converged_indices) > 0:
+                    speed = converged_indices[0] - start
+                    convergence_speeds.append(max(0, speed))
 
-    # --- 3. General Forgetting Loop ---
+            speed_str = get_stats_string(convergence_speeds)
+            max_str = get_stats_string(max_scores)
+            
+            if len(convergence_speeds) == 0:
+                 print(f"    {group:<25}: Not Reached (Max: {max_str})")
+            else:
+                 print(f"    {group:<25}: {speed_str} steps (Max: {max_str})")
+
+    # --- 5. General Forgetting Loop ---
+    print(f"\n[ Forgetting Analysis (Baseline - Current) ]")
+    
     task_definitions = [
         ("Task 0", "task_0_eval_return", task_switches[0], 0),
         ("Task 1", "task_1_eval_return", task_switches[1], 1),
@@ -176,38 +236,50 @@ def print_text_analysis(df):
     switch_map = {0: task_switches[0], 1: task_switches[1], 2: task_switches[2], 3: task_switches[3]}
 
     for task_name, metric, baseline_step, task_idx in task_definitions:
-        print(f"\n[ {task_name} Forgetting Analysis ]")
-        t_data = df[df["Metric"] == metric]
-        if t_data.empty: continue
+        print(f"\n[ {task_name} Forgetting ]")
+        
+        if df[df["Metric"] == metric].empty: continue
 
         for group in groups:
-            g_data = t_data[t_data["Group"] == group]
-            
-            # Baseline (End of Task X)
-            base_window = g_data[(g_data["Step"] <= baseline_step) & (g_data["Step"] > baseline_step - 10000)]
-            if base_window.empty:
-                if g_data.empty: baseline_score = 0.0
-                else: baseline_score = g_data.loc[(g_data["Step"] - baseline_step).abs().idxmin(), "Value"]
-            else:
-                baseline_score = base_window["Value"].mean()
+            group_runs = df[(df["Group"] == group) & (df["Metric"] == metric)]["Run"].unique()
+            baselines = []
+            forgetting_results = {} 
 
-            print(f"  > {group}: Baseline {baseline_score:.2f}")
-
-            for future_idx in range(task_idx + 1, 4):
-                future_step = switch_map.get(future_idx)
-                future_label = f"Task {future_idx}"
+            for run in group_runs:
+                run_data = df[(df["Run"] == run) & (df["Metric"] == metric)]
                 
-                future_window = g_data[(g_data["Step"] <= future_step) & (g_data["Step"] > future_step - 10000)]
-                if future_window.empty:
-                    if g_data.empty: current_score = 0.0
-                    else: current_score = g_data.loc[(g_data["Step"] - future_step).abs().idxmin(), "Value"]
+                base_window = run_data[(run_data["Step"] <= baseline_step) & (run_data["Step"] > baseline_step - 10000)]
+                if base_window.empty:
+                    if run_data.empty: continue
+                    baseline_val = run_data.iloc[(run_data["Step"] - baseline_step).abs().argmin()]["Return"]
                 else:
-                    current_score = future_window["Value"].mean()
+                    baseline_val = base_window["Return"].mean()
                 
-                forgetting = current_score - baseline_score 
-                print(f"      Forgetting after {future_label}: {forgetting:.2f}")
+                baselines.append(baseline_val)
+                
+                for future_idx in range(task_idx + 1, 4):
+                    future_step = switch_map.get(future_idx)
+                    future_label = f"Task {future_idx}"
+                    
+                    if future_label not in forgetting_results: forgetting_results[future_label] = []
 
-    print("="*60 + "\n")
+                    future_window = run_data[(run_data["Step"] <= future_step) & (run_data["Step"] > future_step - 10000)]
+                    
+                    if future_window.empty:
+                        current_val = run_data.iloc[(run_data["Step"] - future_step).abs().argmin()]["Return"]
+                    else:
+                        current_val = future_window["Return"].mean()
+                    
+                    forgetting_results[future_label].append(baseline_val - current_val)
+
+            print(f"  > {group:<25}: Baseline {get_stats_string(baselines)}")
+            
+            sorted_tasks = sorted(forgetting_results.keys())
+            for future_label in sorted_tasks:
+                vals = forgetting_results[future_label]
+                print(f"      After {future_label:<7}: {get_stats_string(vals)}")
+
+    print("="*80 + "\n")
     
 def plot_grid(df):
     num_plots = len(metrics_to_plot)
@@ -231,29 +303,28 @@ def plot_grid(df):
             continue
 
         sns.lineplot(
-            data=subset, x="Step", y="Value", hue="Group", style="Group",
+            data=subset, x="Step", y="Return", hue="Group", style="Group",
             palette=palette, linewidth=2, errorbar='sd', ax=ax, legend=(i == 0) 
         )
         
         ax.set_title(metric, fontsize=14, fontweight='bold')
         ax.set_xlabel("Env Steps")
-        ax.set_ylabel("Value")
+        ax.set_ylabel("Return")
         for switch in task_switches:
             ax.axvline(x=switch, color='black', linestyle=':', alpha=0.5)
 
-        # Save individual plot
         plt.figure()
         sns.lineplot(
-            data=subset, x="Step", y="Value", hue="Group", style="Group",
+            data=subset, x="Step", y="Return", hue="Group", style="Group",
             palette=palette, linewidth=2, errorbar='sd'
         )
         plt.title(metric, fontsize=14, fontweight='bold')
         plt.xlabel("Env Steps")
-        plt.ylabel("Value")
+        plt.ylabel("Return")
         for switch in task_switches:
             plt.axvline(x=switch, color='black', linestyle=':', alpha=0.5)
         plt.tight_layout()
-        individual_path = f"new_imgs/{metric}_plot.png"
+        individual_path = f"run_imgs1/{metric}_plot.png"
         plt.savefig(individual_path, dpi=300)
         plt.close()
         print(f"✅ Saved individual plot for {metric} to: {individual_path}")
@@ -261,7 +332,7 @@ def plot_grid(df):
     for j in range(i + 1, len(axes)): axes[j].axis('off')
 
     plt.tight_layout()
-    plt.savefig("new_imgs/final_results_grid_shaded.png", dpi=300)
+    plt.savefig("run_imgs1/final_results_grid_shaded.png", dpi=300)
     print(f"✅ Comparison Grid Saved to: final_results_grid_shaded.png")
     plt.show()
 
